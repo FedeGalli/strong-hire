@@ -1,0 +1,211 @@
+{% extends "base.html" %}
+{% block title %}Your Interview Breakdown &amp; Judgement — {{ session.candidate_name }}{% endblock %}
+
+{% block content %}
+<div class="max-w-5xl mx-auto px-4 sm:px-6 py-10 sm:py-14 space-y-8 animate-slide-up">
+    <!-- Top Header & Session Metadata -->
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-zinc-200 pb-6">
+        <div>
+            <div class="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-1.5">
+                <span class="w-2 h-2 rounded-full bg-zinc-900"></span>
+                <span>Official Mock Interview Evaluation</span>
+            </div>
+            <h1 class="text-2xl sm:text-3xl font-bold text-zinc-900 tracking-tight">
+                Interview Breakdown: {{ session.candidate_name }}
+            </h1>
+            <p class="text-xs sm:text-sm text-zinc-500 mt-1.5">
+                Target: <strong class="text-zinc-900">{{ session.target_role }} @ {{ session.target_company }}</strong>
+                &bull; Language: <strong class="text-zinc-900">{{ session.preferred_language | upper }}</strong>
+                &bull; Date: <span class="utc-datetime font-medium text-zinc-800">{{ session.start_time }}</span>
+            </p>
+        </div>
+
+        <div class="flex items-center gap-2.5 self-start sm:self-center">
+            {% if session.bundle_id and session.bundle_credits_remaining and session.bundle_credits_remaining > 0 %}
+            <a
+                href="/bundle/{{ session.bundle_id }}"
+                class="px-4 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-white text-xs font-semibold transition"
+            >
+                Schedule Next Bundle Session ({{ session.bundle_credits_remaining }} Left) &rarr;
+            </a>
+            {% else %}
+            <a
+                href="/book"
+                class="px-4 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-white text-xs font-semibold transition"
+            >
+                Book Follow-Up Session
+            </a>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+        <!-- Left 8 Cols: Judgement & Feedback Breakdown (Read-Only View of Admin Form) -->
+        <div class="lg:col-span-8 space-y-6">
+            <div class="rounded-2xl bg-white border border-zinc-200 p-6 sm:p-8 shadow-2xs space-y-6">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-zinc-100 pb-4">
+                    <div>
+                        <h2 class="text-base font-bold text-zinc-900">Feedback Breakdown (Sections 1–5)</h2>
+                        <p class="text-xs text-zinc-500">Detailed assessment across core SWE technical interview dimensions.</p>
+                    </div>
+                    {% set total_score = (session.score_clarification or 0) + (session.score_approach_complexity or 0) + (session.score_code_quality or 0) + (session.score_verification or 0) %}
+                    <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-100 border border-zinc-200 text-xs font-mono font-semibold text-zinc-900 self-start">
+                        <span>Total Score:</span>
+                        <span>{{ total_score }} / 20</span>
+                    </div>
+                </div>
+
+                <!-- Final Hiring Verdict / Result Bar (Matches Admin Form Layout) -->
+                <div class="p-4 sm:p-5 rounded-xl bg-zinc-50 border border-zinc-200 space-y-2.5">
+                    <div class="flex items-center justify-between">
+                        <span class="block text-xs font-semibold uppercase tracking-wider text-zinc-600">
+                            Final Interview Judgement / Result
+                        </span>
+                        {% if not session.final_verdict %}
+                        <span class="text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-0.5 rounded-full">
+                            Evaluation In Progress
+                        </span>
+                        {% endif %}
+                    </div>
+                    <div class="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-1">
+                        {% for v in verdict_options %}
+                        {% set is_selected = (session.final_verdict == v) %}
+                        <div class="text-center py-2.5 px-2.5 rounded-lg border text-xs font-semibold transition
+                            {% if is_selected %}
+                                {% if v in ['Strong Hire', 'Hire'] %}
+                                    border-emerald-600 bg-emerald-600 text-white shadow-2xs
+                                {% elif v == 'Lean Hire' %}
+                                    border-zinc-900 bg-zinc-900 text-white shadow-2xs
+                                {% else %}
+                                    border-amber-600 bg-amber-600 text-white shadow-2xs
+                                {% endif %}
+                            {% else %}
+                                border-zinc-200 bg-white text-zinc-400 opacity-60
+                            {% endif %}
+                        ">
+                            {{ v }}
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+
+                <!-- Section 1: Problem Clarification -->
+                <div class="space-y-2">
+                    <div class="flex items-center justify-between">
+                        <span class="text-sm font-semibold text-zinc-900">1. Problem Clarification &amp; Requirements</span>
+                        <span class="px-2.5 py-1 rounded-lg bg-zinc-100 border border-zinc-200 text-xs font-mono font-semibold text-zinc-900">
+                            Score: {{ session.score_clarification or '-' }} / 5
+                        </span>
+                    </div>
+                    <div class="w-full rounded-xl bg-zinc-50/70 border border-zinc-200 p-4 text-sm text-zinc-800 whitespace-pre-line leading-relaxed">{{ session.notes_clarification or 'No detailed notes recorded for this section.' }}</div>
+                </div>
+
+                <!-- Section 2: Algorithmic Approach & Complexity -->
+                <div class="space-y-2">
+                    <div class="flex items-center justify-between">
+                        <span class="text-sm font-semibold text-zinc-900">2. Algorithmic Approach &amp; Time/Space Complexity</span>
+                        <span class="px-2.5 py-1 rounded-lg bg-zinc-100 border border-zinc-200 text-xs font-mono font-semibold text-zinc-900">
+                            Score: {{ session.score_approach_complexity or '-' }} / 5
+                        </span>
+                    </div>
+                    <div class="w-full rounded-xl bg-zinc-50/70 border border-zinc-200 p-4 text-sm text-zinc-800 whitespace-pre-line leading-relaxed">{{ session.notes_approach_complexity or 'No detailed notes recorded for this section.' }}</div>
+                </div>
+
+                <!-- Section 3: Code Quality & Implementation Speed -->
+                <div class="space-y-2">
+                    <div class="flex items-center justify-between">
+                        <span class="text-sm font-semibold text-zinc-900">3. Code Quality, Syntax &amp; Implementation Speed</span>
+                        <span class="px-2.5 py-1 rounded-lg bg-zinc-100 border border-zinc-200 text-xs font-mono font-semibold text-zinc-900">
+                            Score: {{ session.score_code_quality or '-' }} / 5
+                        </span>
+                    </div>
+                    <div class="w-full rounded-xl bg-zinc-50/70 border border-zinc-200 p-4 text-sm text-zinc-800 whitespace-pre-line leading-relaxed">{{ session.notes_code_quality or 'No detailed notes recorded for this section.' }}</div>
+                </div>
+
+                <!-- Section 4: Verification & Edge Cases -->
+                <div class="space-y-2">
+                    <div class="flex items-center justify-between">
+                        <span class="text-sm font-semibold text-zinc-900">4. Verification, Dry-Run &amp; Edge Cases</span>
+                        <span class="px-2.5 py-1 rounded-lg bg-zinc-100 border border-zinc-200 text-xs font-mono font-semibold text-zinc-900">
+                            Score: {{ session.score_verification or '-' }} / 5
+                        </span>
+                    </div>
+                    <div class="w-full rounded-xl bg-zinc-50/70 border border-zinc-200 p-4 text-sm text-zinc-800 whitespace-pre-line leading-relaxed">{{ session.notes_verification or 'No detailed notes recorded for this section.' }}</div>
+                </div>
+
+                <!-- Section 5: Final Recap & Assignments / Action Plan -->
+                <div class="p-5 rounded-xl bg-zinc-900 text-white space-y-2.5">
+                    <div class="flex items-center justify-between">
+                        <span class="text-sm font-bold tracking-tight">
+                            5. Final Recap, Focus Areas &amp; Targeted Assignments
+                        </span>
+                        <span class="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Action Plan</span>
+                    </div>
+                    <p class="text-xs text-zinc-400">
+                        Concrete takeaways from your interview and recommended practice assignments to level up before your target loop.
+                    </p>
+                    <div class="rounded-lg bg-zinc-800/90 border border-zinc-700 p-4 text-sm text-zinc-100 whitespace-pre-line leading-relaxed">{{ session.final_recap_and_next_steps or 'Your interviewer has not added final recap notes yet.' }}</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right 4 Cols: Session Summary & Code Snapshot -->
+        <div class="lg:col-span-4 space-y-6">
+            <div class="rounded-2xl bg-white border border-zinc-200 p-6 shadow-2xs space-y-4">
+                <h3 class="text-sm font-bold text-zinc-900">Score Overview</h3>
+                <div class="space-y-3 text-xs">
+                    {% for label, score in [
+                        ('1. Clarification', session.score_clarification),
+                        ('2. Approach & Big-O', session.score_approach_complexity),
+                        ('3. Code Fluency', session.score_code_quality),
+                        ('4. Verification', session.score_verification)
+                    ] %}
+                    <div class="space-y-1">
+                        <div class="flex justify-between font-medium text-zinc-700">
+                            <span>{{ label }}</span>
+                            <span class="font-mono font-semibold text-zinc-900">{{ score or 0 }} / 5</span>
+                        </div>
+                        <div class="w-full h-2 rounded-full bg-zinc-100 overflow-hidden">
+                            <div class="h-full bg-zinc-900 rounded-full" style="width: {{ ((score or 0) / 5.0 * 100) | int }}%"></div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <!-- Code Snapshot Card -->
+            <div class="rounded-2xl bg-white border border-zinc-200 p-6 shadow-2xs space-y-3">
+                <div class="flex items-center justify-between">
+                    <h3 class="text-sm font-bold text-zinc-900">Session Code Snapshot</h3>
+                    <span class="text-xs text-zinc-400 font-mono">{{ session.editor_language | upper }}</span>
+                </div>
+                {% for fname, fobj in session.workspace_files.items() %}
+                <div class="space-y-1">
+                    <div class="text-xs font-mono text-zinc-700 bg-zinc-100 px-3 py-1.5 rounded-t-lg border border-b-0 border-zinc-200">
+                        {{ fname }} ({{ fobj.language }})
+                    </div>
+                    <pre class="text-xs font-mono bg-zinc-50 border border-zinc-200 rounded-b-lg p-3 overflow-x-auto text-zinc-800 max-h-96">{{ fobj.content }}</pre>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    document.querySelectorAll('.utc-datetime').forEach((el) => {
+        const raw = el.textContent.trim();
+        const dt = new Date(raw);
+        if (!isNaN(dt)) {
+            el.textContent = dt.toLocaleString(undefined, {
+                weekday: 'short',
+                month: 'short',
+                day: 'numeric',
+                year: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+            });
+        }
+    });
+</script>
+{% endblock %}

@@ -1,0 +1,381 @@
+{% extends "base.html" %}
+{% block title %}{% if mock_paid %}You're All Set — {{ settings.APP_TITLE }}{% else %}Complete Your Booking Payment — {{ settings.APP_TITLE }}{% endif %}{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl mx-auto px-4 sm:px-6 py-12 sm:py-16 animate-slide-up">
+    <div class="rounded-2xl bg-white border border-zinc-200 p-6 sm:p-10 shadow-sm space-y-8">
+
+        {% if not mock_paid %}
+        <!-- ========================================================= -->
+        <!-- STATE 1: CHECKOUT (PACKAGE + YOUTUBE DISCOUNT + CONSENT)  -->
+        <!-- ========================================================= -->
+        <div
+            x-data="{
+                pkg: '{{ session.package_type or 'single' }}',
+                ytDiscount: {{ 'true' if session.youtube_consent else 'false' }},
+                explicitLegalConsent: {{ 'true' if session.youtube_consent else 'false' }},
+                get standardPrice() { return this.pkg === 'bundle_3' ? {{ settings.PRICE_BUNDLE3_STANDARD_EUR }} : {{ settings.PRICE_SINGLE_STANDARD_EUR }}; },
+                get discountedPrice() { return Math.round(this.standardPrice * 0.8); },
+                get finalPrice() { return this.ytDiscount ? this.discountedPrice : this.standardPrice; }
+            }"
+            class="space-y-7"
+        >
+            <div class="space-y-2">
+                <span class="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+                    <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                    Slot Reserved for 30 Minutes &bull; Complete Checkout
+                </span>
+                <h1 class="text-2xl sm:text-3xl font-bold text-zinc-900 tracking-tight">
+                    Almost done, {{ session.candidate_name }}.
+                </h1>
+                <p class="text-sm text-zinc-600 leading-relaxed">
+                    Your selected slot is held for <strong>30 minutes</strong> (and automatically freed if unpaid). Select your package and optional YouTube discount below to unlock your Google Meet link, Live Coding Editor, and Calendar Invite.
+                </p>
+            </div>
+
+            <!-- Candidate & Session Summary -->
+            <div class="rounded-xl bg-zinc-50 border border-zinc-200 p-5 grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+                <div>
+                    <span class="text-xs text-zinc-400 block">Candidate</span>
+                    <span class="font-semibold text-zinc-900">{{ session.candidate_name }}</span>
+                    <span class="text-xs text-zinc-500 block">{{ session.candidate_email }}</span>
+                </div>
+                <div>
+                    <span class="text-xs text-zinc-400 block">Selected Date &amp; Time</span>
+                    <div id="slot-local-display" data-iso="{{ session.start_time }}">
+                        <span class="font-semibold text-zinc-900 block">{{ session.start_time[:10] }}</span>
+                        <span class="font-semibold text-zinc-900 block">{{ session.start_time[11:16] }} UTC</span>
+                    </div>
+                </div>
+                <div>
+                    <span class="text-xs text-zinc-400 block">Target Role &amp; Company</span>
+                    <span class="font-semibold text-zinc-900">{{ session.target_role }} @ {{ session.target_company }}</span>
+                </div>
+                <div>
+                    <span class="text-xs text-zinc-400 block">Coding Language</span>
+                    <span class="font-semibold text-zinc-900">{{ session.preferred_language | capitalize }}</span>
+                </div>
+            </div>
+
+            <form action="/booking/{{ session.id }}/checkout" method="POST" class="space-y-6">
+                <input type="hidden" name="package_type" :value="pkg" />
+                <input type="hidden" name="youtube_consent" :value="ytDiscount ? '1' : '0'" />
+
+                <!-- 1. Package Selection (Single vs 3-Mock Bundle) -->
+                <div class="space-y-2.5">
+                    <label class="block text-xs font-bold uppercase tracking-wider text-zinc-500">1. Choose Your Package</label>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <button
+                            type="button"
+                            @click="pkg = 'single'"
+                            class="text-left p-4 rounded-xl border transition cursor-pointer flex flex-col justify-between"
+                            :class="pkg === 'single' ? 'border-zinc-900 bg-zinc-900 text-white shadow-xs' : 'border-zinc-200 bg-white hover:border-zinc-400 text-zinc-900'"
+                        >
+                            <div class="flex items-center justify-between w-full">
+                                <span class="text-sm font-bold">1 Mock Interview</span>
+                                <span class="text-base font-bold font-mono">&euro;{{ settings.PRICE_SINGLE_STANDARD_EUR }}</span>
+                            </div>
+                            <p class="text-xs mt-1.5 leading-relaxed" :class="pkg === 'single' ? 'text-zinc-300' : 'text-zinc-500'">
+                                Confirms your selected slot above for a single 60-min session + Feedback Breakdown.
+                            </p>
+                        </button>
+
+                        <button
+                            type="button"
+                            @click="pkg = 'bundle_3'"
+                            class="text-left p-4 rounded-xl border transition cursor-pointer flex flex-col justify-between relative"
+                            :class="pkg === 'bundle_3' ? 'border-zinc-900 bg-zinc-900 text-white shadow-xs' : 'border-zinc-200 bg-white hover:border-zinc-400 text-zinc-900'"
+                        >
+                            <div class="flex items-center justify-between w-full">
+                                <div class="flex items-center gap-1.5">
+                                    <span class="text-sm font-bold">3-Mock Bundle</span>
+                                    <span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500 text-white">SAVE</span>
+                                </div>
+                                <span class="text-base font-bold font-mono">&euro;{{ settings.PRICE_BUNDLE3_STANDARD_EUR }}</span>
+                            </div>
+                            <p class="text-xs mt-1.5 leading-relaxed" :class="pkg === 'bundle_3' ? 'text-zinc-300' : 'text-zinc-500'">
+                                Confirms your selected slot above as <strong>Session #1</strong>, and emails you a link + code to book <strong>Sessions #2 &amp; #3 whenever you want later</strong>.
+                            </p>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 2. YouTube Publication Discount Flag & EU Legal Release -->
+                <div
+                    class="rounded-xl border p-5 transition space-y-4"
+                    :class="ytDiscount ? 'bg-emerald-50/50 border-emerald-300' : 'bg-zinc-50/70 border-zinc-200'"
+                >
+                    <label class="flex items-start gap-3.5 cursor-pointer select-none">
+                        <input
+                            type="checkbox"
+                            x-model="ytDiscount"
+                            @change="if (!ytDiscount) explicitLegalConsent = false"
+                            class="mt-1 w-4 h-4 rounded border-zinc-300 text-zinc-900 focus:ring-zinc-900 cursor-pointer"
+                        />
+                        <div class="flex-1 space-y-1">
+                            <div class="flex flex-wrap items-center justify-between gap-2">
+                                <span class="text-sm font-bold text-zinc-900">
+                                    Get an Instant 20% Discount: Allow Publishing on YouTube
+                                </span>
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                                    20% OFF
+                                </span>
+                            </div>
+                            <p class="text-xs text-zinc-600 leading-relaxed">
+                                Receive an instant <strong>20% off</strong> your selected package by allowing us to record and publish your 1-hour mock interview on YouTube.
+                            </p>
+                        </div>
+                    </label>
+
+                    <!-- EU-Compliant Explicit Legal Consent & Monetization Waiver (Shown under the flag) -->
+                    <div x-show="ytDiscount" class="pt-3 border-t border-emerald-200/80 space-y-3">
+                        <div class="rounded-lg bg-white border border-zinc-200 p-3.5 text-[11px] text-zinc-600 leading-relaxed space-y-2 max-h-48 overflow-y-auto">
+                            <p class="font-bold text-zinc-900 uppercase tracking-wider text-[10px]">
+                                Recording, YouTube Publication &amp; Monetization Waiver Agreement (EU / GDPR Compliant)
+                            </p>
+                            <p>
+                                <strong>1. Explicit Consent to Record &amp; Publish (GDPR Art. 6(1)(a) &amp; Art. 7):</strong> By enabling this discount, you explicitly authorize {{ settings.APP_TITLE }} (the Data Controller &amp; Producer) to record your 60-minute mock interview session(s) (including voice, audio, shared coding workspace, and video if enabled) and to edit, adapt, reproduce, distribute, and publicly communicate the recording in full or in excerpts (including Shorts/clips) on <strong>YouTube</strong> and affiliated educational/social media platforms worldwide and without time limitation. Your email address, phone number, and private contact details will never be published.
+                            </p>
+                            <p>
+                                <strong>2. Assignment of Rights &amp; Complete Waiver of Monetization:</strong> In exchange for the immediate upfront 20% fee discount, which you acknowledge as fair, full, and final consideration under applicable European Union and national copyright and image/voice rights laws, you irrevocably grant {{ settings.APP_TITLE }} an exclusive, worldwide, royalty-free license to commercialize the recording and <strong>expressly waive any right to YouTube Partner Program advertising revenue, sponsorships, royalties, residuals, or any other financial remuneration</strong> generated by the video(s).
+                            </p>
+                            <p>
+                                <strong>3. Right of Withdrawal &amp; Fee Adjustment:</strong> Pursuant to GDPR Art. 7(3), you may withdraw your consent at any time by written notice to {{ settings.ADMIN_EMAIL }} (without affecting the lawfulness of prior publication); if you request keepsake/private status or removal, you agree to reimburse the 20% promotional discount difference to convert your booking to a standard private session.
+                            </p>
+                        </div>
+
+                        <label class="flex items-start gap-2.5 cursor-pointer select-none pt-1">
+                            <input
+                                type="checkbox"
+                                x-model="explicitLegalConsent"
+                                :required="ytDiscount"
+                                class="mt-0.5 w-4 h-4 rounded border-zinc-300 text-zinc-900 focus:ring-zinc-900 cursor-pointer"
+                            />
+                            <span class="text-xs font-medium text-zinc-800 leading-snug">
+                                I have read and explicitly agree to the <strong>YouTube Publication &amp; Monetization Waiver Agreement</strong> above, consenting to the publication of my 1-hour interview(s) on YouTube and waiving all monetization rights from the video(s) in exchange for the discounted price.
+                            </span>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- 3. Checkout Button -->
+                <div class="space-y-3 pt-1">
+                    <button
+                        type="submit"
+                        :disabled="ytDiscount && !explicitLegalConsent"
+                        class="w-full text-left flex flex-col justify-between p-6 rounded-xl bg-zinc-900 hover:bg-zinc-800 disabled:opacity-50 disabled:cursor-not-allowed text-white shadow-sm transition group cursor-pointer"
+                    >
+                        <div class="space-y-1 w-full">
+                            <div class="flex items-center justify-between">
+                                <div class="text-lg font-bold">
+                                    Pay &euro;<span x-text="finalPrice"></span>
+                                    <span class="text-xs font-normal text-zinc-400 ml-1.5" x-text="pkg === 'bundle_3' ? '(3-Mock Bundle)' : '(1 Mock Session)'"></span>
+                                </div>
+                                <span class="text-sm group-hover:translate-x-1 transition">&rarr;</span>
+                            </div>
+                        </div>
+                        <p class="text-xs text-zinc-300 mt-3 leading-relaxed">
+                            Revolut Pro Checkout &bull; Card / Apple Pay / Google Pay
+                        </p>
+                    </button>
+                </div>
+            </form>
+
+            {% if active_order_id and not revolut_live_mode %}
+            <!-- Local Dev / Sandbox Revolut Webhook Simulator (only shown when REVOLUT_API_KEY is empty) -->
+            <div class="rounded-xl bg-amber-50/80 border border-amber-200 p-4 space-y-2.5 text-xs">
+                <div class="flex items-center justify-between gap-2">
+                    <span class="font-bold text-amber-900">
+                        Revolut Order Created ({{ active_order_id }}) &bull; Waiting for Webhook
+                    </span>
+                    <span class="px-2 py-0.5 rounded bg-amber-200/70 text-amber-900 font-mono text-[10px]">
+                        SANDBOX / DEV MODE
+                    </span>
+                </div>
+                <p class="text-amber-800 leading-relaxed">
+                    In production, Revolut sends a signed <code class="font-mono">ORDER_COMPLETED</code> webhook to <code class="font-mono">/webhooks/revolut</code> automatically once the card/Apple Pay payment completes. In local dev mode, click below to dispatch the signed webhook:
+                </p>
+                <form action="/api/dev/revolut/simulate-webhook/{{ session.id }}" method="POST">
+                    <button
+                        type="submit"
+                        class="px-4 py-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-white font-semibold text-xs transition cursor-pointer"
+                    >
+                        Simulate Signed Revolut ORDER_COMPLETED Webhook &rarr;
+                    </button>
+                </form>
+            </div>
+            {% endif %}
+        </div>
+
+        {% else %}
+        <!-- ========================================================= -->
+        <!-- STATE 2: YOU'RE ALL SET (MATCHES CONFIRMATION EMAIL)      -->
+        <!-- ========================================================= -->
+        <div class="space-y-2">
+            <span class="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                Booking Confirmed &bull; Invitation Sent to {{ session.candidate_email }}
+            </span>
+            <h1 class="text-2xl sm:text-3xl font-bold text-zinc-900 tracking-tight">
+                You're all set, {{ session.candidate_name }}!
+            </h1>
+            <p class="text-sm text-zinc-600 leading-relaxed">
+                Your 1-on-1 Software Engineering Mock Interview is confirmed, and a copy of this invitation (with a calendar <code>.ics</code> attachment) has been sent to your email. Below you will find your session summary, direct links to the video call and shared coding workspace, and how to prepare.
+            </p>
+        </div>
+
+        <!-- Session Details Card + Meeting & Editor Buttons -->
+        <div class="rounded-xl bg-zinc-50 border border-zinc-200 p-5 sm:p-6 space-y-5 text-sm">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                    <span class="text-xs text-zinc-400 block">Date &amp; Time</span>
+                    <div id="slot-local-display" data-iso="{{ session.start_time }}">
+                        <span class="font-semibold text-zinc-900 block">{{ session.start_time[:10] }}</span>
+                        <span class="font-semibold text-zinc-900 block">{{ session.start_time[11:16] }} UTC</span>
+                    </div>
+                </div>
+                <div>
+                    <span class="text-xs text-zinc-400 block">Duration</span>
+                    <span class="font-semibold text-zinc-900 block">{{ settings.SESSION_DURATION_MINUTES }} minutes</span>
+                    <span class="text-xs text-zinc-500 block">(Coding + Result Discussion)</span>
+                </div>
+                <div>
+                    <span class="text-xs text-zinc-400 block">Target Role &amp; Company</span>
+                    <span class="font-semibold text-zinc-900">{{ session.target_role }} @ {{ session.target_company }}</span>
+                </div>
+                <div>
+                    <span class="text-xs text-zinc-400 block">Coding Language</span>
+                    <span class="font-semibold text-zinc-900">{{ session.preferred_language | capitalize }}</span>
+                </div>
+            </div>
+
+            <!-- Primary Action Buttons: Meeting + Text Editor -->
+            <div class="pt-4 border-t border-zinc-200/80 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <a
+                    href="{{ session.google_meet_url or 'https://meet.google.com' }}"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="py-3 px-4 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-white font-semibold text-xs text-center transition flex items-center justify-center gap-2"
+                >
+                    <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+                    <span>Join Google Meet Call</span>
+                    <span>&nearr;</span>
+                </a>
+                <a
+                    href="/room/{{ session.id }}"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="py-3 px-4 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-white font-semibold text-xs text-center transition flex items-center justify-center gap-2"
+                >
+                    <span class="font-mono text-zinc-400">&gt;</span>
+                    <span>Open Live Coding Editor</span>
+                    <span>&rarr;</span>
+                </a>
+            </div>
+
+            <div class="pt-1">
+                <a
+                    href="/booking/{{ session.id }}/ics"
+                    class="w-full py-2.5 px-4 rounded-xl bg-white hover:bg-zinc-100 text-zinc-900 border border-zinc-200 font-semibold text-xs text-center transition block"
+                >
+                    Download Calendar Invite (.ics)
+                </a>
+            </div>
+        </div>
+
+        {% if session.bundle_id and session.bundle_credits_remaining and session.bundle_credits_remaining > 0 %}
+        <!-- 3-Mock Bundle Remaining Credits Card -->
+        <div class="rounded-xl bg-zinc-900 text-white p-5 sm:p-6 space-y-3">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+                <span class="text-xs font-semibold uppercase tracking-wider text-emerald-400">
+                    3-Mock Bundle &bull; Session {{ session.bundle_session_number or 1 }} of 3 Confirmed
+                </span>
+                <span class="px-2.5 py-0.5 rounded-full text-xs font-mono bg-zinc-800 text-zinc-200 border border-zinc-700">
+                    Bundle Code: {{ session.bundle_code }}
+                </span>
+            </div>
+            <p class="text-xs sm:text-sm text-zinc-300 leading-relaxed">
+                You have <strong>{{ session.bundle_credits_remaining }} of 3 sessions remaining</strong> in your bundle. This link and your Bundle Code (<code class="font-mono text-white">{{ session.bundle_code }}</code>) are also saved in your confirmation email so you can schedule Session #{{ (session.bundle_session_number or 1) + 1 }} whenever you are ready.
+            </p>
+            <div class="pt-1">
+                <a
+                    href="/bundle/b/{{ session.bundle_access_token }}"
+                    class="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white hover:bg-zinc-100 text-zinc-900 font-semibold text-xs transition"
+                >
+                    <span>Schedule Next Bundle Session ({{ session.bundle_credits_remaining }} Remaining)</span>
+                    <span>&rarr;</span>
+                </a>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Interview Loop & Preparation Checklist -->
+        <div class="rounded-xl bg-white border border-zinc-200 p-5 sm:p-6 space-y-3">
+            <h2 class="text-sm font-bold text-zinc-900">Interview Loop &amp; Preparation Checklist</h2>
+            <ul class="space-y-3 text-xs sm:text-sm text-zinc-600 leading-relaxed list-disc pl-5">
+                <li>
+                    <strong class="text-zinc-900">Requirements:</strong> Make sure you have a working microphone, a PC (desktop or laptop browser), and stable internet access so we can communicate clearly while coding in real time.
+                </li>
+                <li>
+                    <strong class="text-zinc-900">Arrival Time:</strong> Please join <strong>5 minutes before</strong> the call starts to quickly verify your audio and setup so we can begin right on time and dedicate the full hour to your session.
+                </li>
+                <li>
+                    <strong class="text-zinc-900">The Loop:</strong> You will need to join the Google Meet call and open the <a href="/room/{{ session.id }}" target="_blank" class="text-zinc-900 font-semibold underline">Live Coding Editor</a> (the workspace is already open, so feel free to visit the link beforehand to familiarize yourself with it if needed). The session is structured as a <strong>45 min mock interview + 15 min feedback discussion</strong>, followed by a written <em>Feedback Breakdown</em> with your score and targeted practice assignments.
+                </li>
+            </ul>
+        </div>
+        {% endif %}
+
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const el = document.getElementById('slot-local-display');
+    if (el) {
+        try {
+            const rawIso = el.getAttribute('data-iso') || el.textContent.trim();
+            const dt = new Date(rawIso);
+            const datePart = new Intl.DateTimeFormat('en-US', {
+                month: 'short',
+                day: 'numeric',
+                year: 'numeric'
+            }).format(dt);
+            const timePart = new Intl.DateTimeFormat('en-US', {
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: false,
+                timeZoneName: 'short'
+            }).format(dt);
+            el.textContent = '';
+            const s1 = document.createElement('span');
+            s1.className = 'font-semibold text-zinc-900 block';
+            s1.textContent = datePart;
+            const s2 = document.createElement('span');
+            s2.className = 'font-semibold text-zinc-900 block';
+            s2.textContent = timePart;
+            el.appendChild(s1);
+            el.appendChild(s2);
+        } catch (e) {}
+    }
+
+    // If an active Revolut order exists and booking is still pending, poll /booking/{id}/status
+    const isConfirmed = {{ 'true' if mock_paid else 'false' }};
+    const hasOrder = {{ 'true' if active_order_id else 'false' }};
+    if (!isConfirmed && hasOrder) {
+        const pollInterval = setInterval(async () => {
+            try {
+                const res = await fetch('/booking/{{ session.id }}/status');
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.confirmed) {
+                        clearInterval(pollInterval);
+                        window.location.reload();
+                    }
+                }
+            } catch (e) {}
+        }, 3000);
+    }
+});
+</script>
+{% endblock %}

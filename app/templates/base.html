@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-white text-zinc-900 antialiased scroll-smooth">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{% block title %}{{ settings.APP_TITLE }}{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+        [x-cloak] { display: none !important; }
+
+        @keyframes slideInUpSmooth {
+            from {
+                opacity: 0;
+                transform: translateY(18px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        @keyframes slideInRightSmooth {
+            from {
+                opacity: 0;
+                transform: translateX(22px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+        .animate-slide-up {
+            animation: slideInUpSmooth 0.42s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+        }
+        .animate-slide-right {
+            animation: slideInRightSmooth 0.32s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+        }
+    </style>
+    {% block extra_head %}{% endblock %}
+</head>
+<body class="min-h-full flex flex-col bg-white text-zinc-900 selection:bg-zinc-900 selection:text-white overflow-x-hidden">
+    {% block navbar %}
+    <header class="border-b border-zinc-200/80 bg-white/90 backdrop-blur sticky top-0 z-30">
+        <div class="max-w-5xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+            <a href="/" class="flex items-center gap-3 group">
+                <div class="w-8 h-8 rounded-lg bg-zinc-900 flex items-center justify-center font-mono font-semibold text-xs text-white group-hover:bg-zinc-700 transition">
+                    &lt;/&gt;
+                </div>
+                <div class="flex items-center gap-2">
+                    <span class="font-bold text-zinc-900 tracking-tight text-sm sm:text-base">{{ settings.APP_TITLE }}</span>
+                </div>
+            </a>
+            <nav class="flex items-center gap-5 text-sm">
+                <a href="/#process" class="text-zinc-600 hover:text-zinc-900 transition font-medium">How It Works</a>
+                <a href="/book" class="px-4 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-white transition font-medium text-xs sm:text-sm">
+                    Book a Call
+                </a>
+            </nav>
+        </div>
+    </header>
+    {% endblock %}
+
+    <main id="page-main" class="flex-1 transition-all duration-300 ease-out">
+        {% block content %}{% endblock %}
+    </main>
+
+    {% block footer %}
+    <footer class="border-t border-zinc-100 py-8 text-xs text-zinc-400 bg-white">
+        <div class="max-w-5xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-3">
+            <span>&copy; {{ settings.APP_TITLE }} &mdash; 1-on-1 Software Engineering Mock Interviews</span>
+            <div class="flex items-center gap-4">
+                <a href="/book" class="hover:text-zinc-700 transition">Schedule Session</a>
+            </div>
+        </div>
+    </footer>
+    {% endblock %}
+</body>
+</html>

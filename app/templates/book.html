@@ -1,0 +1,854 @@
+{% extends "base.html" %}
+{% block title %}Select a Day &amp; Hour — {{ settings.APP_TITLE }}{% endblock %}
+
+{% block content %}
+<div class="max-w-5xl mx-auto px-4 sm:px-6 py-10 sm:py-14 animate-slide-right" x-data="calendarBooking()">
+    <!-- Page Title & Step Indicator -->
+    <div class="mb-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+            <a href="/" class="text-xs font-medium text-zinc-400 hover:text-zinc-800 transition">&larr; Back to Overview</a>
+            <h1 class="text-2xl sm:text-3xl font-bold tracking-tight text-zinc-900 mt-1">
+                {% if reschedule_session %}
+                Reschedule Your Mock Interview
+                {% elif bundle_session %}
+                Schedule Next Bundle Session ({{ bundle_session.credits_remaining }} of {{ bundle_session.total_sessions }} Remaining)
+                {% else %}
+                Schedule Your 1-on-1 Mock Interview
+                {% endif %}
+            </h1>
+        </div>
+
+        <!-- Clean 2-Step Pill Indicator -->
+        <div class="inline-flex items-center gap-2 bg-zinc-100 p-1 rounded-xl border border-zinc-200 text-xs font-medium self-start">
+            <button
+                type="button"
+                @click="goToStep('calendar')"
+                :class="step === 'calendar' ? 'bg-white text-zinc-900 shadow-sm' : 'text-zinc-500 hover:text-zinc-800'"
+                class="px-3 py-1.5 rounded-lg transition"
+            >
+                1. Day &amp; Hour
+            </button>
+            <button
+                type="button"
+                @click="if (selectedSlot) goToStep('details')"
+                :disabled="!selectedSlot"
+                :class="step === 'details' ? 'bg-white text-zinc-900 shadow-sm' : 'text-zinc-500 disabled:opacity-40'"
+                class="px-3 py-1.5 rounded-lg transition"
+            >
+                {% if reschedule_session or bundle_session %}2. Confirm Slot{% else %}2. Candidate Details{% endif %}
+            </button>
+        </div>
+    </div>
+
+    {% if reschedule_session %}
+    <div class="mb-6 p-4 rounded-xl bg-zinc-900 text-white text-sm flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+        <div>
+            <strong>Hi {{ reschedule_session.candidate_name }}</strong> &mdash; please choose a new available day and hour for your session ({{ reschedule_session.target_role }} @ {{ reschedule_session.target_company }}).
+        </div>
+        <span class="text-xs font-mono px-2.5 py-1 rounded bg-zinc-800 text-zinc-300 shrink-0">No extra payment required</span>
+    </div>
+    {% elif bundle_session %}
+    <div class="mb-6 p-4 rounded-xl bg-zinc-900 text-white text-sm flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+        <div>
+            <strong>3-Mock Bundle Active ({{ bundle_session.candidate_name }})</strong> &mdash; Pick a day and hour below to schedule your next session.
+        </div>
+        <span class="text-xs font-mono px-2.5 py-1 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shrink-0">
+            Code: {{ bundle_session.bundle_code }} &bull; {{ bundle_session.credits_remaining }} of {{ bundle_session.total_sessions }} Left
+        </span>
+    </div>
+    {% else %}
+    <!-- Self-Service 3-Mock Bundle Lookup Bar (if user already bought a bundle) -->
+    <div x-data="{ showLookup: false }" class="mb-6 rounded-xl bg-zinc-50 border border-zinc-200 px-4 py-3 text-xs">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+            <span class="text-zinc-600">
+                <strong class="text-zinc-900">Already bought a 3-Mock Bundle?</strong> Enter your email to receive your private booking link for your remaining sessions.
+            </span>
+            <button
+                type="button"
+                @click="showLookup = !showLookup"
+                class="font-semibold text-zinc-900 underline cursor-pointer"
+                x-text="showLookup ? 'Hide' : 'Use My Bundle Credits &rarr;'"
+            ></button>
+        </div>
+        <form x-show="showLookup" x-cloak action="/book/lookup-bundle" method="POST" class="mt-3 pt-3 border-t border-zinc-200 flex flex-col sm:flex-row gap-2">
+            <input
+                type="email"
+                name="query_str"
+                required
+                placeholder="Enter the email address used for your bundle purchase"
+                class="flex-1 rounded-lg bg-white border border-zinc-300 px-3 py-2 text-xs text-zinc-900 focus:outline-none focus:border-zinc-900"
+            />
+            <button
+                type="submit"
+                class="px-4 py-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-white font-semibold text-xs transition cursor-pointer"
+            >
+                Email My Private Bundle Link &rarr;
+            </button>
+        </form>
+    </div>
+    {% endif %}
+
+    {% if bundle_msg %}
+    <div class="mb-6 p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm">
+        {{ bundle_msg }}
+    </div>
+    {% endif %}
+
+    {% if error_message %}
+    <div class="mb-6 p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm">
+        {{ error_message }}
+    </div>
+    {% endif %}
+
+    <!-- Sequential Sliding Viewport Wrapper (Never stacks both panels at once) -->
+    <div class="relative overflow-hidden">
+        <!-- =============================================================== -->
+        <!-- STEP 1: SELECT DAY & HOUR (Cal.com Minimalist White Layout)     -->
+        <!-- =============================================================== -->
+        <div
+            x-show="step === 'calendar'"
+            class="rounded-2xl bg-white border border-zinc-200 shadow-sm overflow-hidden grid grid-cols-1 lg:grid-cols-12 transition-all duration-250 ease-out"
+            :class="panelAnimState === 'leaving-left'
+                ? 'opacity-0 -translate-x-10'
+                : (panelAnimState === 'entering-left' ? 'opacity-0 -translate-x-10' : 'opacity-100 translate-x-0')"
+        >
+            <!-- Left Column: Session Info (4 Cols) -->
+            <div class="lg:col-span-4 p-6 sm:p-7 border-b lg:border-b-0 lg:border-r border-zinc-200 bg-zinc-50/50 flex flex-col justify-between space-y-6">
+                <div class="space-y-4">
+                    <div class="flex items-center gap-3">
+                        <div class="w-9 h-9 rounded-lg bg-zinc-900 text-white font-mono font-bold text-xs flex items-center justify-center">
+                            &lt;/&gt;
+                        </div>
+                        <div>
+                            <p class="text-xs text-zinc-500 font-medium">{{ settings.APP_TITLE }}</p>
+                            <h2 class="text-base font-bold text-zinc-900">1-on-1 SWE Mock Interview</h2>
+                        </div>
+                    </div>
+
+                    <p class="text-xs text-zinc-600 leading-relaxed">
+                        45m realistic Google-style coding + 15m live result discussion, followed by a personalized Feedback Breakdown page with targeted study assignments.
+                    </p>
+
+                    <div class="space-y-2.5 pt-2 text-xs text-zinc-700">
+                        <div class="flex items-center gap-2.5">
+                            <svg class="w-4 h-4 text-zinc-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                            </svg>
+                            <span><strong>{{ settings.SESSION_DURATION_MINUTES }} minutes</strong> (Coding + Debrief)</span>
+                        </div>
+                        <div class="flex items-center gap-2.5">
+                            <svg class="w-4 h-4 text-zinc-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                            </svg>
+                            <span>Google Meet Link</span>
+                        </div>
+                        <div class="flex items-center gap-2.5">
+                            <svg class="w-4 h-4 text-zinc-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                            </svg>
+                            <span>Live Coding Room</span>
+                        </div>
+                    </div>
+
+                    <div class="p-3 rounded-xl bg-white border border-zinc-200/80 text-[11px] text-zinc-500 space-y-1">
+                        <div class="font-semibold text-zinc-800" x-text="'Standard Availability (' + userTimezone + ')'">Standard Availability</div>
+                        <div x-text="'• Mon–Fri: ' + localWorkdayHoursLabel"></div>
+                        <div x-text="'• Sat–Sun: ' + localWeekendHoursLabel"></div>
+                    </div>
+                </div>
+
+                <div class="pt-4 border-t border-zinc-200/80 space-y-1.5">
+                    {% if bundle_session %}
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs text-zinc-500">Bundle Credit</span>
+                        <span class="text-sm font-bold text-emerald-700">{{ bundle_session.credits_remaining }} of {{ bundle_session.total_sessions }} Left (Pre-Paid)</span>
+                    </div>
+                    {% elif reschedule_session %}
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs text-zinc-500">Reschedule Fee</span>
+                        <span class="text-sm font-bold text-zinc-900">€0 (Included)</span>
+                    </div>
+                    {% else %}
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs text-zinc-500">Session Fee</span>
+                        <div class="flex items-baseline gap-2">
+                            <span class="text-xs text-zinc-400 line-through font-mono">&euro;{{ settings.PRICE_SINGLE_STANDARD_EUR }}</span>
+                            <span class="text-sm font-bold text-zinc-900 font-mono">&euro;{{ settings.PRICE_SINGLE_YOUTUBE_EUR }}</span>
+                            <span class="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-200">-{{ settings.YOUTUBE_DISCOUNT_PERCENT }}%</span>
+                        </div>
+                    </div>
+                    <p class="text-[11px] text-zinc-500 leading-snug">
+                        With optional 20% YouTube discount (&euro;{{ settings.PRICE_SINGLE_STANDARD_EUR }} standard). 3-Mock Bundle also available.
+                    </p>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Center Column: Select a Day (Interactive Monthly Calendar, max 2 months ahead) (5 Cols) -->
+            <div class="lg:col-span-5 p-6 sm:p-7 border-b lg:border-b-0 lg:border-r border-zinc-200">
+                <div class="flex items-center justify-between mb-5">
+                    <div>
+                        <h3 class="text-sm font-semibold text-zinc-900" x-text="monthTitle"></h3>
+                        <p class="text-[11px] text-zinc-400">Select a day (up to 2 months ahead)</p>
+                    </div>
+                    <div class="flex items-center gap-1">
+                        <button
+                            type="button"
+                            @click="prevMonth()"
+                            :disabled="!canGoPrevMonth"
+                            class="p-1.5 rounded-lg border border-zinc-200 hover:bg-zinc-100 disabled:opacity-30 disabled:hover:bg-transparent transition text-zinc-700"
+                        >
+                            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+                            </svg>
+                        </button>
+                        <button
+                            type="button"
+                            @click="nextMonth()"
+                            :disabled="!canGoNextMonth"
+                            class="p-1.5 rounded-lg border border-zinc-200 hover:bg-zinc-100 disabled:opacity-30 disabled:hover:bg-transparent transition text-zinc-700"
+                        >
+                            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Weekday Headers -->
+                <div class="grid grid-cols-7 gap-1 text-center text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-2">
+                    <div>Mon</div>
+                    <div>Tue</div>
+                    <div>Wed</div>
+                    <div>Thu</div>
+                    <div>Fri</div>
+                    <div>Sat</div>
+                    <div>Sun</div>
+                </div>
+
+                <!-- Calendar Days Grid with Sliding Month Transition -->
+                <div
+                    class="grid grid-cols-7 gap-1.5 transition-all duration-200 ease-out"
+                    :class="monthAnimating ? 'opacity-0 translate-x-3' : 'opacity-100 translate-x-0'"
+                >
+                    <template x-for="(cell, idx) in calendarCells" :key="idx">
+                        <div>
+                            <template x-if="!cell.day">
+                                <div class="h-10"></div>
+                            </template>
+                            <template x-if="cell.day">
+                                <button
+                                    type="button"
+                                    :disabled="!cell.hasSlots"
+                                    @click="selectDate(cell.dateKey)"
+                                    class="w-full h-10 rounded-xl text-xs font-medium flex flex-col items-center justify-center relative transition-all duration-150"
+                                    :class="{
+                                        'bg-zinc-900 text-white font-bold shadow-sm scale-[1.03]': selectedDateKey === cell.dateKey,
+                                        'bg-zinc-100/90 hover:bg-zinc-200/80 text-zinc-900 font-semibold border border-zinc-200/80': cell.hasSlots && selectedDateKey !== cell.dateKey,
+                                        'text-zinc-300 cursor-not-allowed': !cell.hasSlots
+                                    }"
+                                >
+                                    <span x-text="cell.day"></span>
+                                    <span
+                                        x-show="cell.hasSlots"
+                                        class="w-1.5 h-1.5 rounded-full mt-0.5"
+                                        :class="cell.isOverHalfFree ? 'bg-emerald-500' : 'bg-amber-400'"
+                                    ></span>
+                                </button>
+                            </template>
+                        </div>
+                    </template>
+                </div>
+
+                <!-- Availability Dot Legend -->
+                <div class="mt-4 pt-3 border-t border-zinc-100 flex items-center gap-4 text-[11px] text-zinc-500">
+                    <div class="flex items-center gap-1.5">
+                        <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block"></span>
+                        <span>&gt;50% slots free</span>
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                        <span class="w-1.5 h-1.5 rounded-full bg-amber-400 inline-block"></span>
+                        <span>&le;50% slots free</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Column: Select an Hour for the Chosen Day (3 Cols) with Sliding Animation -->
+            <div class="lg:col-span-3 p-6 sm:p-7 flex flex-col justify-between bg-white overflow-hidden">
+                <div>
+                    <div
+                        class="transition-all duration-200 ease-out"
+                        :class="timesAnimating ? 'opacity-0 translate-x-5' : 'opacity-100 translate-x-0'"
+                    >
+                        <h3 class="text-sm font-semibold text-zinc-900 mb-0.5" x-text="selectedDateFormatted || 'Select a Day'"></h3>
+                        <p class="text-[11px] text-zinc-400 mb-4">Select an available hour</p>
+
+                        <template x-if="selectedDateKey && slotsForSelectedDate.length > 0">
+                            <div class="space-y-2 max-h-72 overflow-y-auto pr-1">
+                                <template x-for="slot in slotsForSelectedDate" :key="slot.id">
+                                    <button
+                                        type="button"
+                                        @click="chooseSlotAndContinue(slot)"
+                                        class="w-full py-2.5 px-3.5 rounded-xl border text-xs font-semibold transition-all duration-150 flex items-center justify-between group"
+                                        :class="selectedSlot && selectedSlot.id === slot.id
+                                            ? 'border-zinc-900 bg-zinc-900 text-white'
+                                            : 'border-zinc-200 bg-white hover:border-zinc-900 hover:translate-x-0.5 text-zinc-800'"
+                                    >
+                                        <span x-text="slot.localTimeLabel"></span>
+                                        <span class="text-[11px] opacity-0 group-hover:opacity-100 transition">Next &rarr;</span>
+                                    </button>
+                                </template>
+                            </div>
+                        </template>
+
+                        <template x-if="!selectedDateKey || slotsForSelectedDate.length === 0">
+                            <div class="py-12 text-center text-xs text-zinc-400">
+                                Pick a highlighted day on the calendar to view available hours.
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- =============================================================== -->
+        <!-- STEP 2: CANDIDATE INTAKE DETAILS FORM (Appears ONLY after Step 1 slides out) -->
+        <!-- =============================================================== -->
+        <div
+            x-show="step === 'details'"
+            x-cloak
+            class="max-w-2xl mx-auto transition-all duration-250 ease-out"
+            :class="panelAnimState === 'entering-right' || panelAnimState === 'leaving-right'
+                ? 'opacity-0 translate-x-10'
+                : 'opacity-100 translate-x-0'"
+        >
+            {% if reschedule_session %}
+            <form action="/reschedule/{{ reschedule_session.id }}" method="POST" class="rounded-2xl bg-white border border-zinc-200 p-6 sm:p-8 shadow-sm space-y-6">
+                <input type="hidden" name="slot_id" :value="selectedSlot ? selectedSlot.id : ''" />
+
+                <!-- Selected Day & Hour Summary Banner -->
+                <div class="p-4 rounded-xl bg-zinc-50 border border-zinc-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                        <span class="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 block">New Selected Appointment</span>
+                        <div class="text-sm font-bold text-zinc-900 mt-0.5">
+                            <span x-text="selectedDateFormatted"></span> at <span x-text="selectedSlot ? selectedSlot.localTimeLabel : ''"></span>
+                            <span class="text-xs font-normal text-zinc-500" x-text="'(' + userTimezone + ')'"></span>
+                        </div>
+                    </div>
+                    <button
+                        type="button"
+                        @click="goToStep('calendar')"
+                        class="text-xs font-semibold text-zinc-700 hover:text-zinc-900 px-3 py-1.5 rounded-lg bg-white border border-zinc-200 shadow-2xs transition self-start sm:self-center"
+                    >
+                        &larr; Change Day / Hour
+                    </button>
+                </div>
+
+                <div class="rounded-xl bg-zinc-50/70 border border-zinc-200 p-4 text-xs text-zinc-700 space-y-1.5">
+                    <div class="font-semibold text-zinc-900 text-sm">Session Details Preserved</div>
+                    <div><strong>Candidate:</strong> {{ reschedule_session.candidate_name }} ({{ reschedule_session.candidate_email }})</div>
+                    <div><strong>Target:</strong> {{ reschedule_session.target_role }} @ {{ reschedule_session.target_company }} &bull; {{ reschedule_session.preferred_language | upper }}</div>
+                </div>
+
+                <div class="pt-2 flex items-center justify-between gap-4">
+                    <button
+                        type="button"
+                        @click="goToStep('calendar')"
+                        class="px-5 py-3 rounded-xl border border-zinc-200 hover:bg-zinc-50 text-zinc-700 text-xs font-semibold transition"
+                    >
+                        &larr; Back
+                    </button>
+                    <button
+                        type="submit"
+                        class="flex-1 py-3 px-6 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-white font-semibold text-sm shadow-sm transition flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                        <span>Confirm Rescheduled Date &amp; Time</span>
+                        <span>&rarr;</span>
+                    </button>
+                </div>
+            </form>
+            {% elif bundle_session %}
+            <form action="/bundle/b/{{ bundle_access_token or bundle_session.access_token }}" method="POST" class="rounded-2xl bg-white border border-zinc-200 p-6 sm:p-8 shadow-sm space-y-6">
+                <input type="hidden" name="slot_id" :value="selectedSlot ? selectedSlot.id : ''" />
+
+                <!-- Selected Day & Hour Summary Banner -->
+                <div class="p-4 rounded-xl bg-zinc-50 border border-zinc-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                        <span class="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 block">Selected Bundle Appointment</span>
+                        <div class="text-sm font-bold text-zinc-900 mt-0.5">
+                            <span x-text="selectedDateFormatted"></span> at <span x-text="selectedSlot ? selectedSlot.localTimeLabel : ''"></span>
+                            <span class="text-xs font-normal text-zinc-500" x-text="'(' + userTimezone + ')'"></span>
+                        </div>
+                    </div>
+                    <button
+                        type="button"
+                        @click="goToStep('calendar')"
+                        class="text-xs font-semibold text-zinc-700 hover:text-zinc-900 px-3 py-1.5 rounded-lg bg-white border border-zinc-200 shadow-2xs transition self-start sm:self-center"
+                    >
+                        &larr; Change Day / Hour
+                    </button>
+                </div>
+
+                <div>
+                    <h2 class="text-lg font-bold text-zinc-900">Confirm Session Details (Bundle Code: {{ bundle_session.bundle_code }})</h2>
+                    <p class="text-xs text-zinc-500 mt-0.5">
+                        Your details are pre-filled from your bundle. You can update your target company, role, or language for this session if needed.
+                    </p>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-xs font-medium text-zinc-700 mb-1.5">Full Name *</label>
+                        <input
+                            type="text"
+                            name="candidate_name"
+                            value="{{ bundle_session.candidate_name }}"
+                            required
+                            class="w-full rounded-xl bg-white border border-zinc-300 px-3.5 py-2.5 text-sm text-zinc-900 focus:outline-none focus:border-zinc-900"
+                        />
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-zinc-700 mb-1.5">LeetCode Problems Solved *</label>
+                        <input
+                            type="number"
+                            name="leetcode_solved"
+                            min="0"
+                            max="5000"
+                            value="{{ bundle_session.leetcode_solved }}"
+                            required
+                            class="w-full rounded-xl bg-white border border-zinc-300 px-3.5 py-2.5 text-sm text-zinc-900 focus:outline-none focus:border-zinc-900"
+                        />
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-xs font-medium text-zinc-700 mb-1.5">Target Company / Companies *</label>
+                        <input
+                            type="text"
+                            name="target_company"
+                            value="{{ bundle_session.target_company }}"
+                            required
+                            class="w-full rounded-xl bg-white border border-zinc-300 px-3.5 py-2.5 text-sm text-zinc-900 focus:outline-none focus:border-zinc-900"
+                        />
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-zinc-700 mb-1.5">Target Role / Level *</label>
+                        <select
+                            name="target_role"
+                            required
+                            class="w-full rounded-xl bg-white border border-zinc-300 px-3.5 py-2.5 text-sm text-zinc-900 focus:outline-none focus:border-zinc-900"
+                        >
+                            {% for role in target_roles %}
+                            <option value="{{ role }}" {% if role == bundle_session.target_role %}selected{% endif %}>{{ role }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-medium text-zinc-700 mb-1.5">Preferred Coding Language *</label>
+                    <select
+                        name="preferred_language"
+                        required
+                        class="w-full rounded-xl bg-white border border-zinc-300 px-3.5 py-2.5 text-sm text-zinc-900 focus:outline-none focus:border-zinc-900"
+                    >
+                        {% for lang_key, lang_label in supported_languages %}
+                        <option value="{{ lang_key }}" {% if lang_key == bundle_session.preferred_language %}selected{% endif %}>{{ lang_label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="pt-2 flex items-center justify-between gap-4">
+                    <button
+                        type="button"
+                        @click="goToStep('calendar')"
+                        class="px-5 py-3 rounded-xl border border-zinc-200 hover:bg-zinc-50 text-zinc-700 text-xs font-semibold transition"
+                    >
+                        &larr; Back
+                    </button>
+                    <button
+                        type="submit"
+                        class="flex-1 py-3 px-6 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-white font-semibold text-sm shadow-sm transition flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                        <span>Confirm Session &amp; Use 1 Bundle Credit ({{ bundle_session.credits_remaining }} Left)</span>
+                        <span>&rarr;</span>
+                    </button>
+                </div>
+            </form>
+            {% else %}
+            <form action="/book" method="POST" class="rounded-2xl bg-white border border-zinc-200 p-6 sm:p-8 shadow-sm space-y-6">
+                <input type="hidden" name="slot_id" :value="selectedSlot ? selectedSlot.id : ''" />
+                <input type="hidden" name="package_type" :value="selectedPackage" />
+                <!-- Anti-bot honeypot field -->
+                <div class="hidden" aria-hidden="true">
+                    <input type="text" name="website_url" tabindex="-1" autocomplete="off" />
+                </div>
+
+                <!-- Selected Day & Hour Summary Banner -->
+                <div class="p-4 rounded-xl bg-zinc-50 border border-zinc-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                        <span class="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 block">Selected Appointment</span>
+                        <div class="text-sm font-bold text-zinc-900 mt-0.5">
+                            <span x-text="selectedDateFormatted"></span> at <span x-text="selectedSlot ? selectedSlot.localTimeLabel : ''"></span>
+                            <span class="text-xs font-normal text-zinc-500" x-text="'(' + userTimezone + ')'"></span>
+                        </div>
+                    </div>
+                    <button
+                        type="button"
+                        @click="goToStep('calendar')"
+                        class="text-xs font-semibold text-zinc-700 hover:text-zinc-900 px-3 py-1.5 rounded-lg bg-white border border-zinc-200 shadow-2xs transition self-start sm:self-center"
+                    >
+                        &larr; Change Day / Hour
+                    </button>
+                </div>
+
+                <div>
+                    <h2 class="text-lg font-bold text-zinc-900">Your Candidate Details</h2>
+                    <p class="text-xs text-zinc-500 mt-0.5">
+                        Helps tailor the interview problem and prepare your personalized feedback &amp; assignments.
+                    </p>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-xs font-medium text-zinc-700 mb-1.5">Full Name *</label>
+                        <input
+                            type="text"
+                            name="candidate_name"
+                            required
+                            placeholder="Alex Rivera"
+                            class="w-full rounded-xl bg-white border border-zinc-300 px-3.5 py-2.5 text-sm text-zinc-900 placeholder-zinc-400 focus:outline-none focus:border-zinc-900"
+                        />
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-zinc-700 mb-1.5">Email Address (for Calendar Invite) *</label>
+                        <input
+                            type="email"
+                            name="candidate_email"
+                            required
+                            placeholder="alex@example.com"
+                            class="w-full rounded-xl bg-white border border-zinc-300 px-3.5 py-2.5 text-sm text-zinc-900 placeholder-zinc-400 focus:outline-none focus:border-zinc-900"
+                        />
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-xs font-medium text-zinc-700 mb-1.5">LeetCode Problems Solved *</label>
+                        <input
+                            type="number"
+                            name="leetcode_solved"
+                            min="0"
+                            max="5000"
+                            value="120"
+                            required
+                            class="w-full rounded-xl bg-white border border-zinc-300 px-3.5 py-2.5 text-sm text-zinc-900 focus:outline-none focus:border-zinc-900"
+                        />
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-zinc-700 mb-1.5">Target Company / Companies *</label>
+                        <input
+                            type="text"
+                            name="target_company"
+                            required
+                            placeholder="e.g. Google, Meta, Stripe"
+                            class="w-full rounded-xl bg-white border border-zinc-300 px-3.5 py-2.5 text-sm text-zinc-900 placeholder-zinc-400 focus:outline-none focus:border-zinc-900"
+                        />
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-xs font-medium text-zinc-700 mb-1.5">Target Role / Level *</label>
+                        <select
+                            name="target_role"
+                            required
+                            class="w-full rounded-xl bg-white border border-zinc-300 px-3.5 py-2.5 text-sm text-zinc-900 focus:outline-none focus:border-zinc-900"
+                        >
+                            {% for role in target_roles %}
+                            <option value="{{ role }}">{{ role }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-zinc-700 mb-1.5">Preferred Coding Language *</label>
+                        <select
+                            name="preferred_language"
+                            required
+                            class="w-full rounded-xl bg-white border border-zinc-300 px-3.5 py-2.5 text-sm text-zinc-900 focus:outline-none focus:border-zinc-900"
+                        >
+                            {% for lang_key, lang_label in supported_languages %}
+                            <option value="{{ lang_key }}">{{ lang_label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+
+                <div class="pt-2 flex items-center justify-between gap-4">
+                    <button
+                        type="button"
+                        @click="goToStep('calendar')"
+                        class="px-5 py-3 rounded-xl border border-zinc-200 hover:bg-zinc-50 text-zinc-700 text-xs font-semibold transition"
+                    >
+                        &larr; Back
+                    </button>
+                    <button
+                        type="submit"
+                        class="flex-1 py-3 px-6 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-white font-semibold text-sm shadow-sm transition flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                        <span>Confirm Slot &amp; Proceed to Checkout</span>
+                        <span>&rarr;</span>
+                    </button>
+                </div>
+            </form>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<script>
+function calendarBooking() {
+    const rawSlots = {{ slots | tojson }};
+    const allWindowSlots = {{ (all_window_slots or slots) | tojson }};
+    const weeklySchedule = {{ (weekly_schedule or {}) | tojson }};
+    const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Rome';
+
+    function romeHourToLocalLabel(romeHour) {
+        const now = new Date();
+        const utcDate = new Date(now.toLocaleString('en-US', { timeZone: 'UTC' }));
+        const romeDate = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/Rome' }));
+        const romeOffsetMinutes = Math.round((romeDate - utcDate) / 60000);
+        const utcMillis = Date.UTC(
+            now.getUTCFullYear(),
+            now.getUTCMonth(),
+            now.getUTCDate(),
+            romeHour,
+            0,
+            0
+        ) - romeOffsetMinutes * 60000;
+        return new Intl.DateTimeFormat('en-GB', {
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+        }).format(new Date(utcMillis));
+    }
+
+    function formatRomeHoursToLocalRanges(hoursArray) {
+        const sorted = [...new Set(hoursArray || [])].map(Number).sort((a, b) => a - b);
+        if (sorted.length === 0) return 'Closed';
+        const ranges = [];
+        let rangeStart = sorted[0];
+        let prev = sorted[0];
+        for (let i = 1; i < sorted.length; i++) {
+            if (sorted[i] === prev + 1) {
+                prev = sorted[i];
+            } else {
+                ranges.push(`${romeHourToLocalLabel(rangeStart)} – ${romeHourToLocalLabel(prev + 1)}`);
+                rangeStart = sorted[i];
+                prev = sorted[i];
+            }
+        }
+        ranges.push(`${romeHourToLocalLabel(rangeStart)} – ${romeHourToLocalLabel(prev + 1)}`);
+        return ranges.join(' & ');
+    }
+
+    const localWorkdayHoursLabel = formatRomeHoursToLocalRanges(
+        weeklySchedule['0'] || [17, 18, 19, 20, 21]
+    );
+    const localWeekendHoursLabel = formatRomeHoursToLocalRanges(
+        weeklySchedule['5'] || [9, 10, 11, 14, 15, 16, 17]
+    );
+
+    // Track total slots (free + booked) per local YYYY-MM-DD date key
+    const totalSlotsCountByDate = {};
+    allWindowSlots.forEach((s) => {
+        const dt = new Date(s.start_time);
+        const dateKey = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+        totalSlotsCountByDate[dateKey] = (totalSlotsCountByDate[dateKey] || 0) + 1;
+    });
+
+    // Group available (free) slots by local YYYY-MM-DD date key
+    const slotsByDate = {};
+    const enrichedSlots = rawSlots.map((s) => {
+        const dt = new Date(s.start_time);
+        const year = dt.getFullYear();
+        const month = String(dt.getMonth() + 1).padStart(2, '0');
+        const day = String(dt.getDate()).padStart(2, '0');
+        const dateKey = `${year}-${month}-${day}`;
+        const localTimeLabel = new Intl.DateTimeFormat('en-GB', {
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+        }).format(dt);
+        const item = { ...s, dateKey, localTimeLabel, dateObj: dt };
+        if (!slotsByDate[dateKey]) slotsByDate[dateKey] = [];
+        slotsByDate[dateKey].push(item);
+        return item;
+    });
+
+    const today = new Date();
+    const minMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+    const maxDate = new Date(today.getTime() + 60 * 24 * 60 * 60 * 1000); // +2 months (60 days)
+    const maxMonth = new Date(maxDate.getFullYear(), maxDate.getMonth(), 1);
+
+    const firstAvailableDateKey = enrichedSlots.length > 0 ? enrichedSlots[0].dateKey : null;
+    const initialMonthDate = enrichedSlots.length > 0
+        ? new Date(enrichedSlots[0].dateObj.getFullYear(), enrichedSlots[0].dateObj.getMonth(), 1)
+        : minMonth;
+
+    return {
+        step: 'calendar',
+        panelAnimState: 'idle', // 'idle' | 'leaving-left' | 'entering-right' | 'leaving-right' | 'entering-left'
+        selectedPackage: '{{ initial_package or 'single' }}',
+        resumeMode: 'file',
+        userTimezone,
+        localWorkdayHoursLabel,
+        localWeekendHoursLabel,
+        currentYear: initialMonthDate.getFullYear(),
+        currentMonth: initialMonthDate.getMonth(),
+        selectedDateKey: firstAvailableDateKey,
+        selectedSlot: null,
+        timesAnimating: false,
+        monthAnimating: false,
+
+        get monthTitle() {
+            const d = new Date(this.currentYear, this.currentMonth, 1);
+            return new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric' }).format(d);
+        },
+
+        get canGoPrevMonth() {
+            const cur = new Date(this.currentYear, this.currentMonth, 1);
+            return cur > minMonth;
+        },
+
+        get canGoNextMonth() {
+            const cur = new Date(this.currentYear, this.currentMonth, 1);
+            return cur < maxMonth;
+        },
+
+        prevMonth() {
+            if (!this.canGoPrevMonth) return;
+            this.monthAnimating = true;
+            setTimeout(() => {
+                if (this.currentMonth === 0) {
+                    this.currentMonth = 11;
+                    this.currentYear -= 1;
+                } else {
+                    this.currentMonth -= 1;
+                }
+                this.monthAnimating = false;
+            }, 130);
+        },
+
+        nextMonth() {
+            if (!this.canGoNextMonth) return;
+            this.monthAnimating = true;
+            setTimeout(() => {
+                if (this.currentMonth === 11) {
+                    this.currentMonth = 0;
+                    this.currentYear += 1;
+                } else {
+                    this.currentMonth += 1;
+                }
+                this.monthAnimating = false;
+            }, 130);
+        },
+
+        get calendarCells() {
+            const firstDayOfMonth = new Date(this.currentYear, this.currentMonth, 1);
+            const daysInMonth = new Date(this.currentYear, this.currentMonth + 1, 0).getDate();
+            const startOffset = (firstDayOfMonth.getDay() + 6) % 7;
+
+            const cells = [];
+            for (let i = 0; i < startOffset; i++) {
+                cells.push({ day: null, dateKey: null, hasSlots: false, isOverHalfFree: false });
+            }
+            for (let d = 1; d <= daysInMonth; d++) {
+                const mStr = String(this.currentMonth + 1).padStart(2, '0');
+                const dStr = String(d).padStart(2, '0');
+                const key = `${this.currentYear}-${mStr}-${dStr}`;
+                const freeSlots = slotsByDate[key] || [];
+                const freeCount = freeSlots.length;
+                const hasSlots = freeCount > 0;
+
+                // Compute weekday index (Monday=0 .. Sunday=6) to check baseline capacity
+                const cellDate = new Date(this.currentYear, this.currentMonth, d);
+                const weekdayIdx = String((cellDate.getDay() + 6) % 7);
+                const templateCapacity = (weeklySchedule[weekdayIdx] || []).length;
+                const totalOnDate = Math.max(totalSlotsCountByDate[key] || 0, templateCapacity, freeCount);
+                const isOverHalfFree = totalOnDate > 0 ? (freeCount / totalOnDate) > 0.5 : true;
+
+                cells.push({ day: d, dateKey: key, hasSlots, isOverHalfFree });
+            }
+            return cells;
+        },
+
+        get slotsForSelectedDate() {
+            if (!this.selectedDateKey) return [];
+            return slotsByDate[this.selectedDateKey] || [];
+        },
+
+        get selectedDateFormatted() {
+            if (!this.selectedDateKey) return '';
+            const [y, m, d] = this.selectedDateKey.split('-').map(Number);
+            const dt = new Date(y, m - 1, d);
+            return new Intl.DateTimeFormat('en-US', {
+                weekday: 'short',
+                month: 'short',
+                day: 'numeric'
+            }).format(dt);
+        },
+
+        selectDate(dateKey) {
+            if (this.selectedDateKey === dateKey) return;
+            this.timesAnimating = true;
+            setTimeout(() => {
+                this.selectedDateKey = dateKey;
+                this.selectedSlot = null;
+                this.timesAnimating = false;
+            }, 140);
+        },
+
+        goToStep(target) {
+            if (this.step === target || this.panelAnimState !== 'idle') return;
+            if (target === 'details') {
+                // 1. Slide calendar out to the left first
+                this.panelAnimState = 'leaving-left';
+                setTimeout(() => {
+                    // 2. Hide calendar, mount details in offscreen-right state
+                    this.step = 'details';
+                    this.panelAnimState = 'entering-right';
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                    requestAnimationFrame(() => {
+                        requestAnimationFrame(() => {
+                            // 3. Slide details into center
+                            this.panelAnimState = 'idle';
+                        });
+                    });
+                }, 220);
+            } else {
+                // 1. Slide details out to the right first
+                this.panelAnimState = 'leaving-right';
+                setTimeout(() => {
+                    // 2. Hide details, mount calendar in offscreen-left state
+                    this.step = 'calendar';
+                    this.panelAnimState = 'entering-left';
+                    requestAnimationFrame(() => {
+                        requestAnimationFrame(() => {
+                            // 3. Slide calendar back into center
+                            this.panelAnimState = 'idle';
+                        });
+                    });
+                }, 220);
+            }
+        },
+
+        chooseSlotAndContinue(slot) {
+            this.selectedSlot = slot;
+            this.goToStep('details');
+        }
+    };
+}
+</script>
+{% endblock %}

@@ -1,0 +1,250 @@
+{% extends "base.html" %}
+{% block title %}{{ settings.APP_TITLE }} — 1-on-1 SWE Mock Interviews &amp; Personalized Study Plan{% endblock %}
+
+{% block content %}
+<div class="bg-white animate-slide-up" x-data="{ leavingToBook: false }">
+    <!-- Minimalist Hero Section -->
+    <section
+        class="max-w-4xl mx-auto px-4 sm:px-6 pt-16 pb-20 sm:pt-24 sm:pb-24 text-center transition-all duration-300 ease-in-out"
+        :class="leavingToBook ? 'opacity-0 -translate-x-10' : 'opacity-100 translate-x-0'"
+    >
+
+        <h1 class="text-4xl sm:text-6xl font-bold tracking-tight text-zinc-900 max-w-3xl mx-auto leading-[1.1]">
+            Real Google-style coding interviews. Actionable feedback to pass.
+        </h1>
+
+        <p class="mt-6 text-base sm:text-lg text-zinc-600 max-w-2xl mx-auto leading-relaxed">
+            Stop guessing why you aren't clearing technical rounds. Practice a realistic 1-hour Data Structures &amp; Algorithms interview, discuss your result live, and get a personalized study &amp; assignment plan.
+        </p>
+
+        <div class="mt-9 flex flex-col sm:flex-row items-center justify-center gap-3.5">
+            <a
+                href="/book"
+                @click.prevent="leavingToBook = true; setTimeout(() => { window.location.href = '/book'; }, 240)"
+                class="w-full sm:w-auto px-7 py-3.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-white font-semibold text-sm shadow-sm transition-all duration-200 flex items-center justify-center gap-2 group"
+            >
+                <span>Select a Day &amp; Book a Call</span>
+                <svg class="w-4 h-4 ml-0.5 transform group-hover:translate-x-1 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"/>
+                </svg>
+            </a>
+            <a
+                href="#process"
+                class="w-full sm:w-auto px-6 py-3.5 rounded-xl bg-white hover:bg-zinc-50 text-zinc-700 border border-zinc-200 font-medium text-sm transition"
+            >
+                See How the Process Works
+            </a>
+        </div>
+    </section>
+
+    <!-- Visual Step-by-Step Journey (Replaces the 3 boxy tiles) -->
+    <section
+        id="process"
+        class="border-t border-zinc-100 bg-zinc-50/50 py-20 sm:py-24 transition-all duration-300 ease-in-out"
+        :class="leavingToBook ? 'opacity-0 -translate-x-10' : 'opacity-100 translate-x-0'"
+    >
+        <div class="max-w-4xl mx-auto px-4 sm:px-6">
+            <div class="mb-16">
+                <p class="text-xs font-semibold uppercase tracking-widest text-zinc-400 mb-2">How It Works</p>
+                <h2 class="text-2xl sm:text-3xl font-bold text-zinc-900 tracking-tight">
+                    A clear, linear 3-step path from booking to mastering your weak spots.
+                </h2>
+            </div>
+
+            <!-- Connected Vertical Timeline -->
+            <div class="relative space-y-16 before:hidden md:before:block before:absolute before:left-[19px] before:top-4 before:bottom-4 before:w-px before:bg-zinc-200">
+
+                <!-- STEP 1: Schedule Your Appointment -->
+                <div class="relative md:pl-14 grid grid-cols-1 md:grid-cols-12 gap-8 items-center">
+                    <div class="hidden md:flex absolute left-0 top-1 w-10 h-10 rounded-full bg-zinc-900 text-white font-mono text-xs font-bold items-center justify-center ring-8 ring-zinc-50">
+                        01
+                    </div>
+
+                    <div class="md:col-span-6 space-y-3">
+                        <span class="inline-block md:hidden px-2.5 py-0.5 rounded-md bg-zinc-900 text-white font-mono text-xs font-bold">
+                            Step 01
+                        </span>
+                        <h3 class="text-xl font-bold text-zinc-900">You schedule your appointment</h3>
+                        <p class="text-sm text-zinc-600 leading-relaxed">
+                            Pick a day on the calendar and choose your preferred hour. Share your target company, current LeetCode progress, and preferred coding language. You immediately receive a calendar invitation (<code class="text-zinc-800 font-mono text-xs">.ics</code>) with your Google Meet link and standalone coding room URL.
+                        </p>
+                        <div class="pt-1 flex flex-wrap gap-2 text-xs text-zinc-500">
+                            <span id="landing-workdays-pill" class="px-2.5 py-1 rounded-lg bg-white border border-zinc-200">Workdays: 17:00–22:00 CET</span>
+                            <span id="landing-weekends-pill" class="px-2.5 py-1 rounded-lg bg-white border border-zinc-200">Weekends: 09:00–12:00 &amp; 14:00–18:00 CET</span>
+                        </div>
+                    </div>
+
+                    <!-- Visual Representation for Step 1 -->
+                    <div class="md:col-span-6">
+                        <div class="rounded-2xl bg-white border border-zinc-200 p-5 shadow-2xs space-y-3">
+                            <div class="flex items-center justify-between text-xs border-b border-zinc-100 pb-3">
+                                <span class="font-semibold text-zinc-900">Select Day &amp; Hour</span>
+                                <span class="text-zinc-400 font-mono">Up to 2 months ahead</span>
+                            </div>
+                            <div class="grid grid-cols-5 gap-1.5 text-center text-xs">
+                                <div class="py-2 rounded-lg bg-zinc-50 text-zinc-400">Mon<br><span class="font-semibold text-zinc-700">12</span></div>
+                                <div class="py-2 rounded-lg bg-zinc-900 text-white font-bold shadow-2xs">Tue<br><span>13</span></div>
+                                <div class="py-2 rounded-lg bg-zinc-50 text-zinc-400">Wed<br><span class="font-semibold text-zinc-700">14</span></div>
+                                <div class="py-2 rounded-lg bg-zinc-50 text-zinc-400">Thu<br><span class="font-semibold text-zinc-700">15</span></div>
+                                <div class="py-2 rounded-lg bg-zinc-50 text-zinc-400">Sat<br><span class="font-semibold text-zinc-700">17</span></div>
+                            </div>
+                            <div class="flex items-center gap-2 pt-1">
+                                <span class="px-3 py-1.5 rounded-lg border border-zinc-200 text-xs font-medium text-zinc-600">17:00</span>
+                                <span class="px-3 py-1.5 rounded-lg bg-zinc-900 text-white text-xs font-semibold">18:00 &check;</span>
+                                <span class="px-3 py-1.5 rounded-lg border border-zinc-200 text-xs font-medium text-zinc-600">19:00</span>
+                                <span class="px-3 py-1.5 rounded-lg border border-zinc-200 text-xs font-medium text-zinc-600">20:00</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- STEP 2: 1h of Interview / Discussing the Result -->
+                <div class="relative md:pl-14 grid grid-cols-1 md:grid-cols-12 gap-8 items-center">
+                    <div class="hidden md:flex absolute left-0 top-1 w-10 h-10 rounded-full bg-zinc-900 text-white font-mono text-xs font-bold items-center justify-center ring-8 ring-zinc-50">
+                        02
+                    </div>
+
+                    <div class="md:col-span-6 space-y-3">
+                        <span class="inline-block md:hidden px-2.5 py-0.5 rounded-md bg-zinc-900 text-white font-mono text-xs font-bold">
+                            Step 02
+                        </span>
+                        <h3 class="text-xl font-bold text-zinc-900">1 hour of live interview &amp; discussing your result</h3>
+                        <p class="text-sm text-zinc-600 leading-relaxed">
+                            You solve a curated technical interview problem in our minimalist shared coding editor (with no autocomplete distractions, just like Google). In the final part of the hour, we break down your performance live, walk through optimal trade-offs, and discuss your hiring verdict (<strong class="text-zinc-900">Strong Hire</strong> to <strong class="text-zinc-900">No Hire</strong>).
+                        </p>
+                    </div>
+
+                    <!-- Visual Representation for Step 2 (60-Min Timeline Bar + Live Editor Preview) -->
+                    <div class="md:col-span-6">
+                        <div class="rounded-2xl bg-white border border-zinc-200 p-5 shadow-2xs space-y-4">
+                            <!-- 60-Min Split Visual -->
+                            <div class="space-y-1.5">
+                                <div class="flex justify-between text-[11px] font-semibold">
+                                    <span class="text-zinc-900">45 min &bull; Live Coding Problem</span>
+                                    <span class="text-emerald-700">15 min &bull; Result &amp; Debrief</span>
+                                </div>
+                                <div class="h-2.5 w-full rounded-full bg-zinc-100 overflow-hidden flex">
+                                    <div class="w-3/4 bg-zinc-900"></div>
+                                    <div class="w-1/4 bg-emerald-500"></div>
+                                </div>
+                            </div>
+
+                            <!-- Mini Code & Verdict Bar -->
+                            <div class="rounded-xl bg-zinc-50 border border-zinc-200/80 p-3 font-mono text-xs text-zinc-700 space-y-1">
+                                <div class="text-zinc-400">// Shared Interview Room (Plain Text / Syntax Toggle)</div>
+                                <div><span class="text-zinc-900 font-semibold">def</span> find_optimal_path(graph, start, end):</div>
+                                <div class="pl-4 text-zinc-500"># Live complexity &amp; edge-case evaluation...</div>
+                            </div>
+
+                            <div class="flex items-center justify-between text-xs pt-1">
+                                <span class="text-zinc-500">Live Hiring Signal</span>
+                                <span class="px-2.5 py-0.5 rounded-full font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                    Strong Hire / Lean Hire / ...
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- STEP 3: Personalized Feedback + Assignments -->
+                <div class="relative md:pl-14 grid grid-cols-1 md:grid-cols-12 gap-8 items-center">
+                    <div class="hidden md:flex absolute left-0 top-1 w-10 h-10 rounded-full bg-zinc-900 text-white font-mono text-xs font-bold items-center justify-center ring-8 ring-zinc-50">
+                        03
+                    </div>
+
+                    <div class="md:col-span-6 space-y-3">
+                        <span class="inline-block md:hidden px-2.5 py-0.5 rounded-md bg-zinc-900 text-white font-mono text-xs font-bold">
+                            Step 03
+                        </span>
+                        <h3 class="text-xl font-bold text-zinc-900">You receive personalized feedback &amp; targeted assignments</h3>
+                        <p class="text-sm text-zinc-600 leading-relaxed">
+                            You receive the link to your custom <em>Feedback Breakdown</em> page. It highlights the exact areas holding you back (clarification, complexity analysis, coding speed, or dry-running) along with concrete homework assignments and problem patterns to practice next.
+                        </p>
+                    </div>
+
+                    <!-- Visual Representation for Step 3 (Feedback + Assignments Card) -->
+                    <div class="md:col-span-6">
+                        <div class="rounded-2xl bg-white border border-zinc-200 p-5 shadow-2xs space-y-3.5">
+                            <div class="flex items-center justify-between border-b border-zinc-100 pb-3">
+                                <div>
+                                    <span class="text-[10px] font-mono uppercase tracking-wider text-zinc-400 block">Threaded Session Link</span>
+                                    <span class="text-xs font-bold text-zinc-900">Feedback Breakdown &amp; Judgement</span>
+                                </div>
+                                <span class="text-[11px] font-mono text-zinc-500">Scores 1–5 + Code</span>
+                            </div>
+
+                            <div class="space-y-2 text-xs">
+                                <div class="p-2.5 rounded-xl bg-zinc-50 border border-zinc-200/70 flex items-center justify-between">
+                                    <span class="text-zinc-700 font-medium">Focus Area: Dry-Run &amp; Boundary Checks</span>
+                                    <span class="font-mono font-semibold text-zinc-900">3 / 5</span>
+                                </div>
+                                <div class="p-3 rounded-xl bg-zinc-900 text-white space-y-1.5">
+                                    <div class="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">Assigned Next Steps to Improve</div>
+                                    <ul class="space-y-1 text-zinc-200 text-xs">
+                                        <li>&check; Drill 5 monotonic stack &amp; sliding window problems without IDE autocomplete</li>
+                                        <li>&check; Practice verbalizing invariant checks on empty/single-node inputs before coding</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Bottom CTA -->
+            <div class="mt-16 pt-10 border-t border-zinc-200/80 flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div>
+                    <h3 class="text-base font-bold text-zinc-900">Ready to test yourself under real interview conditions?</h3>
+                    <p class="text-xs text-zinc-500 mt-0.5">Select an available day and hour up to 2 months ahead.</p>
+                </div>
+                <a
+                    href="/book"
+                    @click.prevent="leavingToBook = true; setTimeout(() => { window.location.href = '/book'; }, 240)"
+                    class="px-6 py-3 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-white text-xs sm:text-sm font-semibold transition flex items-center gap-2 shrink-0"
+                >
+                    <span>Select a Day &amp; Book Now</span>
+                    <span>&rarr;</span>
+                </a>
+            </div>
+        </div>
+    </section>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    try {
+        const userTz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Rome';
+        const now = new Date();
+        const utcDate = new Date(now.toLocaleString('en-US', { timeZone: 'UTC' }));
+        const romeDate = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/Rome' }));
+        const romeOffsetMinutes = Math.round((romeDate - utcDate) / 60000);
+
+        const toLocal = (romeHour) => {
+            const utcMillis = Date.UTC(
+                now.getUTCFullYear(),
+                now.getUTCMonth(),
+                now.getUTCDate(),
+                romeHour,
+                0,
+                0
+            ) - romeOffsetMinutes * 60000;
+            return new Intl.DateTimeFormat('en-GB', {
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: false
+            }).format(new Date(utcMillis));
+        };
+
+        const workEl = document.getElementById('landing-workdays-pill');
+        const weekEl = document.getElementById('landing-weekends-pill');
+        if (workEl) {
+            workEl.textContent = `Mon–Fri: ${toLocal(17)}–${toLocal(22)} (${userTz})`;
+        }
+        if (weekEl) {
+            weekEl.textContent = `Sat–Sun: ${toLocal(9)}–${toLocal(12)} & ${toLocal(14)}–${toLocal(18)} (${userTz})`;
+        }
+    } catch (e) {}
+});
+</script>
+{% endblock %}

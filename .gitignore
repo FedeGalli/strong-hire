@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.pytest_cache/
+.env
+interviews.db
+interviews.db-wal
+interviews.db-shm
+uploads/email_outbox/
+credentials.json
+token.json

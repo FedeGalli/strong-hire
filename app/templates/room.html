@@ -1,0 +1,663 @@
+{% extends "base.html" %}
+{% block title %}Live Interview Room — {{ session.candidate_name }} | {{ settings.APP_TITLE }}{% endblock %}
+
+{% block extra_head %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/ace.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/mode-python.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/mode-c_cpp.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/mode-java.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/mode-javascript.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/mode-golang.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/mode-csharp.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/mode-rust.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/theme-tomorrow_night.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/theme-chrome.min.js"></script>
+{% endblock %}
+
+{% block navbar %}{% endblock %}
+{% block footer %}{% endblock %}
+
+{% block content %}
+<div class="h-screen w-screen overflow-hidden flex flex-col bg-white text-zinc-900">
+    <!-- Top Room Control Bar (Minimalist White) -->
+    <header class="h-14 shrink-0 border-b border-zinc-200 bg-white px-4 flex items-center justify-between gap-4">
+        <div class="flex items-center gap-3">
+            <a href="{{ '/admin' if is_interviewer else '/' }}" class="w-8 h-8 rounded-lg bg-zinc-900 flex items-center justify-center font-mono font-bold text-xs text-white">
+                &lt;/&gt;
+            </a>
+            <div>
+                <div class="flex items-center gap-2">
+                    <span class="font-semibold text-sm text-zinc-900">{{ session.candidate_name }}</span>
+                    {% if is_interviewer %}
+                    <span class="px-2 py-0.5 rounded text-[11px] font-semibold bg-zinc-900 text-white">
+                        INTERVIEWER VIEW
+                    </span>
+                    {% else %}
+                    <span class="px-2 py-0.5 rounded text-[11px] font-medium bg-zinc-100 text-zinc-600 border border-zinc-200">
+                        CANDIDATE VIEW
+                    </span>
+                    {% endif %}
+                </div>
+                <div class="flex items-center gap-1.5 text-[11px] text-zinc-500">
+                    <span id="ws-status-dot" class="w-2 h-2 rounded-full bg-emerald-500 inline-block"></span>
+                    <span id="ws-status-text">Live Sync Connected</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Center Controls: Syntax Status Badge (Candidate) OR Interactive Toggle (Interviewer) -->
+        <div class="flex items-center gap-3">
+            <div id="syntax-status-pill" class="px-3 py-1 rounded-full text-xs font-mono border border-zinc-200 bg-zinc-50 text-zinc-700">
+                Mode: Plain Text
+            </div>
+
+            {% if is_interviewer %}
+            <div class="hidden md:flex items-center gap-2.5 bg-zinc-50 border border-zinc-200 rounded-xl px-3 py-1.5">
+                <label class="flex items-center gap-2 cursor-pointer text-xs font-medium text-zinc-800">
+                    <input
+                        type="checkbox"
+                        id="toggle-syntax"
+                        {% if session.syntax_highlighting_enabled %}checked{% endif %}
+                        class="rounded border-zinc-300 text-zinc-900 focus:ring-0"
+                    />
+                    <span>Syntax Highlighting</span>
+                </label>
+
+                <span class="text-zinc-300">|</span>
+
+                <select
+                    id="select-language"
+                    class="bg-white border border-zinc-200 rounded-lg px-2 py-1 text-xs text-zinc-900 focus:outline-none focus:border-zinc-900"
+                >
+                    {% for lang_key, lang_label in supported_languages %}
+                    <option value="{{ lang_key }}" {% if session.editor_language == lang_key %}selected{% endif %}>
+                        {{ lang_label }}
+                    </option>
+                    {% endfor %}
+                </select>
+
+                <span class="text-zinc-300">|</span>
+
+                <select
+                    id="select-interview-mode"
+                    class="bg-white border border-zinc-200 rounded-lg px-2 py-1 text-xs text-zinc-700 focus:outline-none focus:border-zinc-900"
+                >
+                    <option value="classic_dsa" {% if session.interview_mode == 'classic_dsa' %}selected{% endif %}>
+                        Mode: Classic DSA
+                    </option>
+                    <option value="ai_multifile" {% if session.interview_mode == 'ai_multifile' %}selected{% endif %}>
+                        Mode: v2 AI Multi-File
+                    </option>
+                </select>
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- Right Controls: Google Meet + Finalize Link -->
+        <div class="flex items-center gap-2.5">
+            {% if session.google_meet_url %}
+            <a
+                href="{{ session.google_meet_url }}"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="px-3.5 py-1.5 rounded-xl bg-white hover:bg-zinc-50 text-zinc-900 border border-zinc-200 font-semibold text-xs transition flex items-center gap-1.5"
+            >
+                <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+                <span>Join Google Meet</span>
+            </a>
+            {% endif %}
+
+            {% if is_interviewer %}
+            <a
+                href="/admin/session/{{ session.id }}"
+                class="px-3.5 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-white font-semibold text-xs transition"
+            >
+                Finalize &amp; Send Feedback &rarr;
+            </a>
+            {% endif %}
+        </div>
+    </header>
+
+    <!-- Main Split Area -->
+    <div class="flex-1 flex overflow-hidden">
+        <!-- Left Pane: File Tabs + Ace Code Editor + Optional v2 AI Assistant Drawer -->
+        <div class="flex-1 flex flex-col h-full overflow-hidden border-r border-zinc-200 bg-white">
+            <!-- File Tabs Bar -->
+            <div class="h-10 bg-zinc-900 border-b border-zinc-800 px-3 flex items-center justify-between">
+                <div id="file-tabs-container" class="flex items-center gap-1.5 overflow-x-auto"></div>
+                <div class="flex items-center gap-2">
+                    <button
+                        id="btn-toggle-editor-theme"
+                        type="button"
+                        class="text-xs px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition cursor-pointer"
+                    >
+                        Theme: Night
+                    </button>
+                    <button
+                        id="btn-add-file"
+                        type="button"
+                        class="hidden text-xs px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition"
+                    >
+                        + New File
+                    </button>
+                    <button
+                        id="btn-toggle-ai-drawer"
+                        type="button"
+                        class="hidden text-xs px-2.5 py-1 rounded-lg bg-white text-zinc-900 font-semibold transition"
+                    >
+                        AI Coding Assistant
+                    </button>
+                </div>
+            </div>
+
+            <!-- Ace Editor Mount (Night Mode Default) -->
+            <div id="ace-editor" class="flex-1 w-full text-sm"></div>
+
+            <!-- v2 AI Coding Assistant Drawer -->
+            <div id="ai-assistant-drawer" class="hidden h-56 border-t border-zinc-200 bg-zinc-50 flex flex-col">
+                <div class="px-4 py-2 border-b border-zinc-200 flex items-center justify-between text-xs bg-white">
+                    <span class="font-semibold text-zinc-900">AI Coding Assistant (v2 Multi-File Mode &mdash; Synced with Interviewer)</span>
+                    <span class="text-zinc-400">Prompts are logged for evaluation</span>
+                </div>
+                <div id="ai-chat-messages" class="flex-1 overflow-y-auto p-3 space-y-2 text-xs font-mono"></div>
+                <form id="ai-chat-form" class="p-2 border-t border-zinc-200 bg-white flex gap-2">
+                    <input
+                        type="text"
+                        id="ai-prompt-input"
+                        placeholder="Ask the AI assistant about the current file or algorithm..."
+                        class="flex-1 rounded-lg bg-zinc-50 border border-zinc-200 px-3 py-1.5 text-xs text-zinc-900 focus:outline-none focus:border-zinc-900"
+                    />
+                    <button type="submit" class="px-3.5 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-white text-xs font-semibold">
+                        Ask AI
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        {% if is_interviewer %}
+        <!-- Right Pane: Private Interviewer Context + Live Auto-Saving Rubric Form (Minimalist White) -->
+        <aside class="w-full max-w-xl bg-zinc-50/70 flex flex-col h-full overflow-y-auto p-5 space-y-5">
+            <!-- Candidate Intake Context Card -->
+            <div class="rounded-xl bg-white border border-zinc-200 p-4 space-y-2.5 shadow-2xs">
+                <div class="flex items-center justify-between">
+                    <span class="text-xs font-semibold uppercase tracking-wider text-zinc-400">Candidate Intake Context</span>
+                </div>
+                <div class="grid grid-cols-2 gap-2 text-xs">
+                    <div class="p-2.5 rounded-lg bg-zinc-50 border border-zinc-200/80">
+                        <span class="text-zinc-400 block">LeetCode Solved</span>
+                        <span class="font-semibold text-zinc-900">{{ session.leetcode_solved }} problems</span>
+                    </div>
+                    <div class="p-2.5 rounded-lg bg-zinc-50 border border-zinc-200/80">
+                        <span class="text-zinc-400 block">Target Company</span>
+                        <span class="font-semibold text-zinc-900">{{ session.target_company }}</span>
+                    </div>
+                    <div class="p-2.5 rounded-lg bg-zinc-50 border border-zinc-200/80">
+                        <span class="text-zinc-400 block">Target Role</span>
+                        <span class="font-semibold text-zinc-900">{{ session.target_role }}</span>
+                    </div>
+                    <div class="p-2.5 rounded-lg bg-zinc-50 border border-zinc-200/80">
+                        <span class="text-zinc-400 block">Preferred Language</span>
+                        <span class="font-semibold text-zinc-900">{{ session.preferred_language | upper }}</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Private Interviewer Feedback Breakdown Form -->
+            <form id="live-rubric-form" class="space-y-4 flex-1 flex flex-col">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h2 class="text-sm font-bold text-zinc-900">Feedback Breakdown</h2>
+                        <p id="rubric-save-indicator" class="text-[11px] text-zinc-500">Draft auto-saves on edit &bull; Hidden from candidate</p>
+                    </div>
+                    <button
+                        type="button"
+                        id="btn-save-rubric"
+                        class="px-3 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-white font-semibold text-xs transition"
+                    >
+                        Save Draft
+                    </button>
+                </div>
+
+                <!-- 1. Problem Clarification -->
+                <div class="rounded-xl bg-white border border-zinc-200 p-3.5 space-y-2 shadow-2xs">
+                    <div class="flex items-center justify-between">
+                        <label class="text-xs font-semibold text-zinc-900">1. Problem Clarification &amp; Requirements</label>
+                        <select id="score_clarification" class="rounded bg-zinc-50 border border-zinc-200 px-2 py-0.5 text-xs text-zinc-900">
+                            <option value="">Score (1–5)</option>
+                            {% for s in [1,2,3,4,5] %}
+                            <option value="{{ s }}" {% if session.score_clarification == s %}selected{% endif %}>{{ s }} / 5</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <textarea
+                        id="notes_clarification"
+                        rows="2"
+                        placeholder="Clarifying questions, constraints, edge case identification..."
+                        class="w-full rounded-lg bg-zinc-50 border border-zinc-200 p-2 text-xs text-zinc-900 focus:outline-none focus:border-zinc-900"
+                    >{{ session.notes_clarification }}</textarea>
+                </div>
+
+                <!-- 2. Algorithmic Approach & Complexity -->
+                <div class="rounded-xl bg-white border border-zinc-200 p-3.5 space-y-2 shadow-2xs">
+                    <div class="flex items-center justify-between">
+                        <label class="text-xs font-semibold text-zinc-900">2. Algorithmic Approach &amp; Complexity</label>
+                        <select id="score_approach_complexity" class="rounded bg-zinc-50 border border-zinc-200 px-2 py-0.5 text-xs text-zinc-900">
+                            <option value="">Score (1–5)</option>
+                            {% for s in [1,2,3,4,5] %}
+                            <option value="{{ s }}" {% if session.score_approach_complexity == s %}selected{% endif %}>{{ s }} / 5</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <textarea
+                        id="notes_approach_complexity"
+                        rows="2"
+                        placeholder="Brute force vs optimal, data structures, Time & Space Big-O..."
+                        class="w-full rounded-lg bg-zinc-50 border border-zinc-200 p-2 text-xs text-zinc-900 focus:outline-none focus:border-zinc-900"
+                    >{{ session.notes_approach_complexity }}</textarea>
+                </div>
+
+                <!-- 3. Code Quality & Implementation Speed -->
+                <div class="rounded-xl bg-white border border-zinc-200 p-3.5 space-y-2 shadow-2xs">
+                    <div class="flex items-center justify-between">
+                        <label class="text-xs font-semibold text-zinc-900">3. Code Quality, Syntax &amp; Speed</label>
+                        <select id="score_code_quality" class="rounded bg-zinc-50 border border-zinc-200 px-2 py-0.5 text-xs text-zinc-900">
+                            <option value="">Score (1–5)</option>
+                            {% for s in [1,2,3,4,5] %}
+                            <option value="{{ s }}" {% if session.score_code_quality == s %}selected{% endif %}>{{ s }} / 5</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <textarea
+                        id="notes_code_quality"
+                        rows="2"
+                        placeholder="Readability, modularity, naming, syntax accuracy without autocomplete..."
+                        class="w-full rounded-lg bg-zinc-50 border border-zinc-200 p-2 text-xs text-zinc-900 focus:outline-none focus:border-zinc-900"
+                    >{{ session.notes_code_quality }}</textarea>
+                </div>
+
+                <!-- 4. Verification & Edge Cases -->
+                <div class="rounded-xl bg-white border border-zinc-200 p-3.5 space-y-2 shadow-2xs">
+                    <div class="flex items-center justify-between">
+                        <label class="text-xs font-semibold text-zinc-900">4. Verification, Dry-Run &amp; Edge Cases</label>
+                        <select id="score_verification" class="rounded bg-zinc-50 border border-zinc-200 px-2 py-0.5 text-xs text-zinc-900">
+                            <option value="">Score (1–5)</option>
+                            {% for s in [1,2,3,4,5] %}
+                            <option value="{{ s }}" {% if session.score_verification == s %}selected{% endif %}>{{ s }} / 5</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <textarea
+                        id="notes_verification"
+                        rows="2"
+                        placeholder="Line-by-line dry run, catching bugs independently, boundary tests..."
+                        class="w-full rounded-lg bg-zinc-50 border border-zinc-200 p-2 text-xs text-zinc-900 focus:outline-none focus:border-zinc-900"
+                    >{{ session.notes_verification }}</textarea>
+                </div>
+
+                <!-- Final Result / Verdict Selector -->
+                <div class="rounded-xl bg-white border border-zinc-200 p-3.5 space-y-2 shadow-2xs">
+                    <label class="text-xs font-semibold text-zinc-900 block">Final Hiring Verdict</label>
+                    <select id="final_verdict" class="w-full rounded-lg bg-zinc-50 border border-zinc-200 px-3 py-1.5 text-xs font-semibold text-zinc-900">
+                        <option value="">-- Select Verdict --</option>
+                        {% for v in verdict_options %}
+                        <option value="{{ v }}" {% if session.final_verdict == v %}selected{% endif %}>{{ v }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- 5. Final Recap & Where to Push Preparation to Pass -->
+                <div class="rounded-xl bg-white border border-zinc-200 p-3.5 space-y-2 shadow-2xs">
+                    <label class="text-xs font-semibold text-zinc-900 block">
+                        5. Final Recap &amp; Where to Push Preparation to Pass
+                    </label>
+                    <textarea
+                        id="final_recap_and_next_steps"
+                        rows="3"
+                        placeholder="Synthesis of sections 1–4 and concrete study priorities to pass the real interview..."
+                        class="w-full rounded-lg bg-zinc-50 border border-zinc-200 p-2 text-xs text-zinc-900 focus:outline-none focus:border-zinc-900"
+                    >{{ session.final_recap_and_next_steps }}</textarea>
+                </div>
+            </form>
+        </aside>
+        {% endif %}
+    </div>
+</div>
+
+<script>
+(() => {
+    const SESSION_ID = {{ session.id | tojson }};
+    const IS_INTERVIEWER = {{ is_interviewer | tojson }};
+    const INTERVIEWER_KEY = {{ (interviewer_key or '') | tojson }};
+
+    let workspaceFiles = {{ session.workspace_files | tojson }};
+    let activeFilename = {{ session.active_filename | tojson }};
+    let syntaxEnabled = {{ session.syntax_highlighting_enabled | tojson }};
+    let editorLanguage = {{ session.editor_language | tojson }};
+    let interviewMode = {{ session.interview_mode | tojson }};
+    let aiChatLogs = {{ session.ai_chat_logs | tojson }};
+
+    const aceModeMap = {
+        python: 'ace/mode/python',
+        cpp: 'ace/mode/c_cpp',
+        java: 'ace/mode/java',
+        javascript: 'ace/mode/javascript',
+        go: 'ace/mode/golang',
+        csharp: 'ace/mode/csharp',
+        rust: 'ace/mode/rust'
+    };
+
+    const editor = ace.edit('ace-editor');
+    let isNightMode = true;
+    editor.setTheme('ace/theme/tomorrow_night');
+    editor.setOptions({
+        fontSize: '14px',
+        fontFamily: "'JetBrains Mono', monospace",
+        showPrintMargin: false,
+        enableBasicAutocompletion: false,
+        enableLiveAutocompletion: false,
+        enableSnippets: false,
+        useWorker: false,
+        showFoldWidgets: false,
+        tabSize: 4,
+        useSoftTabs: true
+    });
+
+    const btnToggleTheme = document.getElementById('btn-toggle-editor-theme');
+    if (btnToggleTheme) {
+        btnToggleTheme.addEventListener('click', () => {
+            isNightMode = !isNightMode;
+            editor.setTheme(isNightMode ? 'ace/theme/tomorrow_night' : 'ace/theme/chrome');
+            btnToggleTheme.textContent = isNightMode ? 'Theme: Night' : 'Theme: Light';
+        });
+    }
+
+    let suppressChangeBroadcast = false;
+    let debounceTimer = null;
+
+    function applyEditorConfig() {
+        const pill = document.getElementById('syntax-status-pill');
+        if (syntaxEnabled) {
+            const mode = aceModeMap[editorLanguage] || 'ace/mode/python';
+            editor.session.setMode(mode);
+            pill.textContent = `Syntax Highlighting: ON (${editorLanguage.toUpperCase()})`;
+            pill.className = 'px-3 py-1 rounded-full text-xs font-mono border border-emerald-200 bg-emerald-50 text-emerald-700 font-semibold';
+        } else {
+            editor.session.setMode('ace/mode/text');
+            pill.textContent = 'Syntax Highlighting: OFF (Plain Text)';
+            pill.className = 'px-3 py-1 rounded-full text-xs font-mono border border-zinc-200 bg-zinc-50 text-zinc-600';
+        }
+
+        const btnAddFile = document.getElementById('btn-add-file');
+        const btnAiDrawer = document.getElementById('btn-toggle-ai-drawer');
+        const aiDrawer = document.getElementById('ai-assistant-drawer');
+        if (interviewMode === 'ai_multifile') {
+            btnAddFile.classList.remove('hidden');
+            btnAiDrawer.classList.remove('hidden');
+            aiDrawer.classList.remove('hidden');
+        } else {
+            btnAddFile.classList.add('hidden');
+            btnAiDrawer.classList.add('hidden');
+            aiDrawer.classList.add('hidden');
+        }
+        renderFileTabs();
+    }
+
+    function renderFileTabs() {
+        const container = document.getElementById('file-tabs-container');
+        container.innerHTML = '';
+        Object.keys(workspaceFiles).forEach((fname) => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            const isActive = fname === activeFilename;
+            btn.className = isActive
+                ? 'px-3 py-1 rounded-lg text-xs font-mono font-semibold bg-zinc-700 text-white border border-zinc-600'
+                : 'px-3 py-1 rounded-lg text-xs font-mono bg-zinc-800 text-zinc-400 hover:text-zinc-200 border border-zinc-700/60';
+            btn.textContent = fname;
+            btn.onclick = () => switchActiveFile(fname, true);
+            container.appendChild(btn);
+        });
+    }
+
+    function switchActiveFile(fname, notifyPeer) {
+        if (!workspaceFiles[fname]) return;
+        activeFilename = fname;
+        suppressChangeBroadcast = true;
+        editor.setValue(workspaceFiles[fname].content || '', -1);
+        suppressChangeBroadcast = false;
+        renderFileTabs();
+        if (notifyPeer && ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+                type: 'file_switch',
+                active_filename: activeFilename,
+                workspace_files: workspaceFiles
+            }));
+        }
+    }
+
+    function renderAiLogs() {
+        const box = document.getElementById('ai-chat-messages');
+        if (!box) return;
+        box.textContent = '';
+        aiChatLogs.forEach((item) => {
+            const div = document.createElement('div');
+            div.className = 'p-2.5 rounded-lg bg-white border border-zinc-200 space-y-1';
+
+            const promptHeader = document.createElement('div');
+            promptHeader.className = 'text-zinc-900 font-semibold';
+            promptHeader.textContent = `Candidate Prompt (${item.active_filename || 'solution.txt'}): ${item.candidate_prompt || ''}`;
+
+            const replyBody = document.createElement('div');
+            replyBody.className = 'text-zinc-600 whitespace-pre-wrap';
+            replyBody.textContent = item.assistant_reply || '';
+
+            div.appendChild(promptHeader);
+            div.appendChild(replyBody);
+            box.appendChild(div);
+        });
+        box.scrollTop = box.scrollHeight;
+    }
+
+    if (!workspaceFiles[activeFilename]) {
+        const firstKey = Object.keys(workspaceFiles)[0] || 'solution.txt';
+        activeFilename = firstKey;
+    }
+    suppressChangeBroadcast = true;
+    editor.setValue((workspaceFiles[activeFilename] && workspaceFiles[activeFilename].content) || '', -1);
+    suppressChangeBroadcast = false;
+    applyEditorConfig();
+    renderAiLogs();
+
+    const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsKeyParam = (IS_INTERVIEWER && INTERVIEWER_KEY) ? `?key=${encodeURIComponent(INTERVIEWER_KEY)}` : '';
+    const wsUrl = `${wsProto}//${window.location.host}/ws/room/${SESSION_ID}${wsKeyParam}`;
+    let ws = null;
+
+    function connectWebSocket() {
+        ws = new WebSocket(wsUrl);
+        const dot = document.getElementById('ws-status-dot');
+        const txt = document.getElementById('ws-status-text');
+
+        ws.onopen = () => {
+            dot.className = 'w-2 h-2 rounded-full bg-emerald-500 inline-block';
+            txt.textContent = 'Live Sync Connected';
+        };
+
+        ws.onclose = () => {
+            dot.className = 'w-2 h-2 rounded-full bg-amber-500 inline-block';
+            txt.textContent = 'Reconnecting...';
+            setTimeout(connectWebSocket, 1500);
+        };
+
+        ws.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'code_update') {
+                workspaceFiles = msg.workspace_files || workspaceFiles;
+                if (msg.active_filename && msg.active_filename !== activeFilename) {
+                    activeFilename = msg.active_filename;
+                    renderFileTabs();
+                }
+                const incomingText = (workspaceFiles[activeFilename] || {}).content || '';
+                if (editor.getValue() !== incomingText) {
+                    const cursor = editor.getCursorPosition();
+                    suppressChangeBroadcast = true;
+                    editor.setValue(incomingText, -1);
+                    editor.moveCursorToPosition(cursor);
+                    suppressChangeBroadcast = false;
+                }
+            } else if (msg.type === 'config_update') {
+                syntaxEnabled = Boolean(msg.syntax_highlighting_enabled);
+                editorLanguage = msg.editor_language || editorLanguage;
+                interviewMode = msg.interview_mode || interviewMode;
+                if (IS_INTERVIEWER) {
+                    const toggleEl = document.getElementById('toggle-syntax');
+                    const langEl = document.getElementById('select-language');
+                    const modeEl = document.getElementById('select-interview-mode');
+                    if (toggleEl) toggleEl.checked = syntaxEnabled;
+                    if (langEl) langEl.value = editorLanguage;
+                    if (modeEl) modeEl.value = interviewMode;
+                }
+                applyEditorConfig();
+            } else if (msg.type === 'file_switch') {
+                workspaceFiles = msg.workspace_files || workspaceFiles;
+                switchActiveFile(msg.active_filename, false);
+            } else if (msg.type === 'ai_chat_update') {
+                aiChatLogs = msg.ai_chat_logs || [];
+                renderAiLogs();
+            } else if (msg.type === 'room_locked') {
+                editor.setReadOnly(true);
+                if (!IS_INTERVIEWER && msg.redirect_url) {
+                    window.location.href = msg.redirect_url;
+                }
+            }
+        };
+    }
+
+    connectWebSocket();
+
+    editor.session.on('change', () => {
+        if (suppressChangeBroadcast) return;
+        const currentContent = editor.getValue();
+        if (!workspaceFiles[activeFilename]) {
+            workspaceFiles[activeFilename] = { content: currentContent, language: editorLanguage };
+        } else {
+            workspaceFiles[activeFilename].content = currentContent;
+        }
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'code_update',
+                    active_filename: activeFilename,
+                    workspace_files: workspaceFiles
+                }));
+            }
+        }, 100);
+    });
+
+    const btnAddFile = document.getElementById('btn-add-file');
+    if (btnAddFile) {
+        btnAddFile.addEventListener('click', () => {
+            const fname = prompt('Enter new file name (e.g. helper.py, tests.py):');
+            if (!fname) return;
+            const clean = fname.trim();
+            if (!clean) return;
+            workspaceFiles[clean] = { content: `# ${clean}\n`, language: editorLanguage };
+            switchActiveFile(clean, true);
+        });
+    }
+
+    const btnToggleAi = document.getElementById('btn-toggle-ai-drawer');
+    if (btnToggleAi) {
+        btnToggleAi.addEventListener('click', () => {
+            document.getElementById('ai-assistant-drawer').classList.toggle('hidden');
+        });
+    }
+
+    const aiForm = document.getElementById('ai-chat-form');
+    if (aiForm) {
+        aiForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const input = document.getElementById('ai-prompt-input');
+            const promptText = input.value.trim();
+            if (!promptText || !ws || ws.readyState !== WebSocket.OPEN) return;
+            ws.send(JSON.stringify({
+                type: 'ai_prompt',
+                prompt: promptText,
+                active_filename: activeFilename
+            }));
+            input.value = '';
+        });
+    }
+
+    if (IS_INTERVIEWER) {
+        const toggleEl = document.getElementById('toggle-syntax');
+        const langEl = document.getElementById('select-language');
+        const modeEl = document.getElementById('select-interview-mode');
+
+        function broadcastInterviewerConfig() {
+            syntaxEnabled = toggleEl.checked;
+            editorLanguage = langEl.value;
+            interviewMode = modeEl.value;
+            applyEditorConfig();
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'config_update',
+                    syntax_highlighting_enabled: syntaxEnabled,
+                    editor_language: editorLanguage,
+                    interview_mode: interviewMode
+                }));
+            }
+        }
+
+        toggleEl.addEventListener('change', broadcastInterviewerConfig);
+        langEl.addEventListener('change', broadcastInterviewerConfig);
+        modeEl.addEventListener('change', broadcastInterviewerConfig);
+
+        let rubricTimer = null;
+        const statusEl = document.getElementById('rubric-save-indicator');
+
+        async function saveRubricDraft() {
+            statusEl.textContent = 'Saving draft...';
+            const intOrNull = (val) => (val ? parseInt(val, 10) : null);
+            const payload = {
+                notes_clarification: document.getElementById('notes_clarification').value,
+                score_clarification: intOrNull(document.getElementById('score_clarification').value),
+                notes_approach_complexity: document.getElementById('notes_approach_complexity').value,
+                score_approach_complexity: intOrNull(document.getElementById('score_approach_complexity').value),
+                notes_code_quality: document.getElementById('notes_code_quality').value,
+                score_code_quality: intOrNull(document.getElementById('score_code_quality').value),
+                notes_verification: document.getElementById('notes_verification').value,
+                score_verification: intOrNull(document.getElementById('score_verification').value),
+                final_verdict: document.getElementById('final_verdict').value || null,
+                final_recap_and_next_steps: document.getElementById('final_recap_and_next_steps').value
+            };
+
+            try {
+                const rubricUrl = INTERVIEWER_KEY
+                    ? `/api/session/${SESSION_ID}/rubric?key=${encodeURIComponent(INTERVIEWER_KEY)}`
+                    : `/api/session/${SESSION_ID}/rubric`;
+                const res = await fetch(rubricUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if (res.ok) {
+                    const now = new Date().toLocaleTimeString();
+                    statusEl.textContent = `Draft saved at ${now}`;
+                } else {
+                    statusEl.textContent = 'Error saving draft';
+                }
+            } catch (err) {
+                statusEl.textContent = 'Offline — will retry on save';
+            }
+        }
+
+        document.getElementById('btn-save-rubric').addEventListener('click', saveRubricDraft);
+        document.getElementById('live-rubric-form').addEventListener('input', () => {
+            clearTimeout(rubricTimer);
+            rubricTimer = setTimeout(saveRubricDraft, 800);
+        });
+    }
+})();
+</script>
+{% endblock %}
