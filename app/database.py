@@ -1,4 +1,6 @@
+import base64
 import hashlib
+import hmac
 import json
 import secrets
 import sqlite3
@@ -10,6 +12,7 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 
 MAX_BOOKING_DAYS_AHEAD = 60  # 2 months ahead
+MIN_BOOKING_HOURS_AHEAD = getattr(settings, "MIN_BOOKING_HOURS_AHEAD", 48)  # Minimum 48 hours notice
 PENDING_HOLD_MINUTES = 30  # Automatically free unpaid PENDING_PAYMENT slots after 30 minutes
 MAX_PENDING_PER_IP = 2  # Anti-spam: max concurrent unpaid holds from a single IP
 ROME_TZ = ZoneInfo(settings.HOST_TIMEZONE)
@@ -36,9 +39,136 @@ def hash_token(token: str) -> str:
     return hashlib.sha256((token or "").strip().encode("utf-8")).hexdigest()
 
 
-def generate_bundle_token() -> Tuple[str, str]:
-    raw_token = secrets.token_urlsafe(32)
-    return raw_token, hash_token(raw_token)
+def _derive_bundle_token(bundle_id: str, nonce: str) -> str:
+    """
+    Derives a bundle link token from the bundle id + a random nonce + a server
+    secret. Only the nonce and a hash are stored, so a database leak does not
+    expose usable links.
+    """
+    payload = f"{bundle_id}.{nonce}"
+    signature = hmac.new(
+        settings.BUNDLE_TOKEN_SECRET.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    encoded = base64.urlsafe_b64encode(f"{payload}.{signature}".encode("utf-8")).decode(
+        "ascii"
+    )
+    return encoded.rstrip("=")
+
+
+def parse_bundle_token(token: str) -> Optional[Tuple[str, str]]:
+    """Returns `(bundle_id, nonce)` when the HMAC signature is valid."""
+    tok = (token or "").strip()
+    if not tok:
+        return None
+    try:
+        padded = tok + "=" * (-len(tok) % 4)
+        decoded = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        bundle_id, nonce, signature = decoded.rsplit(".", 2)
+    except Exception:
+        return None
+    payload = f"{bundle_id}.{nonce}"
+    expected = hmac.new(
+        settings.BUNDLE_TOKEN_SECRET.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        return None
+    return bundle_id, nonce
+
+
+def generate_bundle_token(
+    bundle_id: str, nonce: Optional[str] = None
+) -> Tuple[str, str, str]:
+    """Returns `(raw_token, token_hash, nonce)` for a bundle."""
+    nonce = nonce or secrets.token_hex(16)
+    raw_token = _derive_bundle_token(bundle_id, nonce)
+    return raw_token, hash_token(raw_token), nonce
+
+
+def create_admin_session(ttl_seconds: Optional[int] = None) -> str:
+    """Creates a random, server-side revocable admin session token."""
+    ttl = ttl_seconds or settings.ADMIN_SESSION_TTL_SECONDS
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    expires_iso = (now + timedelta(seconds=ttl)).isoformat()
+    token = secrets.token_urlsafe(48)
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        _ensure_schema_columns(cur)
+        conn.execute("DELETE FROM admin_sessions WHERE expires_at <= ?", (now_iso,))
+        conn.execute(
+            """
+            INSERT INTO admin_sessions (token_hash, created_at, expires_at, last_seen_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (hash_token(token), now_iso, expires_iso, now_iso),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return token
+
+
+def is_valid_admin_session(token: str) -> bool:
+    tok = (token or "").strip()
+    if not tok:
+        return False
+    now_iso = datetime.now(timezone.utc).isoformat()
+    token_hash = hash_token(tok)
+    conn = get_db_connection()
+    try:
+        _ensure_schema_columns(conn.cursor())
+        row = conn.execute(
+            "SELECT expires_at FROM admin_sessions WHERE token_hash = ?",
+            (token_hash,),
+        ).fetchone()
+        if not row:
+            return False
+        if row["expires_at"] <= now_iso:
+            conn.execute(
+                "DELETE FROM admin_sessions WHERE token_hash = ?", (token_hash,)
+            )
+            conn.commit()
+            return False
+        conn.execute(
+            "UPDATE admin_sessions SET last_seen_at = ? WHERE token_hash = ?",
+            (now_iso, token_hash),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def revoke_admin_session(token: str) -> None:
+    tok = (token or "").strip()
+    if not tok:
+        return
+    conn = get_db_connection()
+    try:
+        _ensure_schema_columns(conn.cursor())
+        conn.execute(
+            "DELETE FROM admin_sessions WHERE token_hash = ?", (hash_token(tok),)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def prune_expired_admin_sessions() -> int:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    conn = get_db_connection()
+    try:
+        _ensure_schema_columns(conn.cursor())
+        cur = conn.execute("DELETE FROM admin_sessions WHERE expires_at <= ?", (now_iso,))
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
 
 
 def get_db_connection() -> sqlite3.Connection:
@@ -341,7 +471,22 @@ def compute_package_price_eur(package_type: str, youtube_consent: bool) -> int:
     )
 
 
+_SCHEMA_READY_PATH: Optional[str] = None
+
+
 def _ensure_schema_columns(cur: sqlite3.Cursor) -> None:
+    """
+    Runs idempotent schema migrations once per database path.
+
+    Previously this executed several CREATE TABLE / PRAGMA statements on almost
+    every database call. The module-level guard keeps startup migrations but
+    removes that cost from the hot path.
+    """
+    global _SCHEMA_READY_PATH
+    db_path = str(settings.DATABASE_PATH)
+    if _SCHEMA_READY_PATH == db_path:
+        return
+
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS booking_bundles (
@@ -369,12 +514,23 @@ def _ensure_schema_columns(cur: sqlite3.Cursor) -> None:
         );
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_sessions (
+            token_hash TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL
+        );
+        """
+    )
     bundle_cols = {
         r["name"] for r in cur.execute("PRAGMA table_info(booking_bundles);").fetchall()
     }
     bundle_migrations = [
         ("access_token_hash", "TEXT NOT NULL DEFAULT ''"),
         ("access_token", "TEXT NOT NULL DEFAULT ''"),
+        ("token_nonce", "TEXT NOT NULL DEFAULT ''"),
         ("revoked", "INTEGER NOT NULL DEFAULT 0"),
         ("last_lookup_sent_at", "TEXT NOT NULL DEFAULT ''"),
     ]
@@ -382,15 +538,17 @@ def _ensure_schema_columns(cur: sqlite3.Cursor) -> None:
         if col_name not in bundle_cols:
             cur.execute(f"ALTER TABLE booking_bundles ADD COLUMN {col_name} {col_def};")
 
-    # Backfill tokens for any existing bundles missing access_token_hash
-    missing_token_rows = cur.execute(
-        "SELECT id FROM booking_bundles WHERE access_token_hash = '' OR access_token = ''"
+    # Migrate any legacy plaintext bundle tokens to derived (HMAC) tokens.
+    # Old links are intentionally invalidated; bundle links can be resent from
+    # the admin panel. New rows never persist a usable token.
+    legacy_token_rows = cur.execute(
+        "SELECT id FROM booking_bundles WHERE token_nonce = '' OR access_token != ''"
     ).fetchall()
-    for r in missing_token_rows:
-        raw_tok, tok_hash = generate_bundle_token()
+    for r in legacy_token_rows:
+        raw_tok, tok_hash, nonce = generate_bundle_token(r["id"])
         cur.execute(
-            "UPDATE booking_bundles SET access_token = ?, access_token_hash = ? WHERE id = ?",
-            (raw_tok, tok_hash, r["id"]),
+            "UPDATE booking_bundles SET access_token = '', access_token_hash = ?, token_nonce = ? WHERE id = ?",
+            (tok_hash, nonce, r["id"]),
         )
 
     existing_cols = {
@@ -447,6 +605,20 @@ def _ensure_schema_columns(cur: sqlite3.Cursor) -> None:
             WHERE status IN ('PENDING_PAYMENT', 'CONFIRMED');
             """
         )
+
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS idx_sessions_status ON interview_sessions(status);",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_slot ON interview_sessions(slot_id);",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_email ON interview_sessions(candidate_email);",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_order ON interview_sessions(revolut_order_id);",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_bundle ON interview_sessions(bundle_id);",
+        "CREATE INDEX IF NOT EXISTS idx_slots_time ON availability_slots(start_time, is_booked);",
+        "CREATE INDEX IF NOT EXISTS idx_admin_sessions_expiry ON admin_sessions(expires_at);",
+    ):
+        cur.execute(statement)
+
+    _SCHEMA_READY_PATH = db_path
+    cur.connection.commit()
 
 
 def init_db() -> None:
@@ -507,7 +679,7 @@ def init_db() -> None:
             revolut_order_id TEXT NOT NULL DEFAULT '',
             revolut_checkout_url TEXT NOT NULL DEFAULT '',
             paid_at TEXT NOT NULL DEFAULT '',
-            payment_amount_minor TEXT NOT NULL DEFAULT 0,
+            payment_amount_minor INTEGER NOT NULL DEFAULT 0,
 
             -- Meeting & Email Threading Fields
             google_event_id TEXT,
@@ -580,29 +752,26 @@ def expire_stale_pending_bookings(hold_minutes: int = PENDING_HOLD_MINUTES) -> i
     _ensure_schema_columns(cur)
     stale_rows = cur.execute(
         """
-        SELECT id, slot_id, revolut_order_id, hold_expires_at, created_at
+        SELECT id, slot_id, revolut_order_id
         FROM interview_sessions
         WHERE status = 'PENDING_PAYMENT'
           AND (
-              (hold_expires_at != '' AND hold_expires_at <= ? AND created_at <= ?)
+              (hold_expires_at != '' AND hold_expires_at <= ?)
               OR (hold_expires_at = '' AND created_at <= ?)
-              OR created_at <= ?
           )
         """,
-        (now_iso, now_iso, legacy_cutoff_iso, legacy_cutoff_iso),
+        (now_iso, legacy_cutoff_iso),
     ).fetchall()
 
     orders_to_cancel: List[str] = []
+    expired_count = 0
     for r in stale_rows:
-        # If hold_expires_at was explicitly extended into the future AND created_at wasn't manually backdated past cutoff, respect hold_expires_at
-        hold_exp = r["hold_expires_at"] or ""
-        created = r["created_at"] or ""
-        if hold_exp > now_iso and created > legacy_cutoff_iso:
-            continue
         cur.execute(
             "UPDATE interview_sessions SET status = 'CANCELLED' WHERE id = ? AND status = 'PENDING_PAYMENT'",
             (r["id"],),
         )
+        if cur.rowcount:
+            expired_count += 1
         _release_slot_if_unused(cur, int(r["slot_id"]))
         if r["revolut_order_id"]:
             orders_to_cancel.append(r["revolut_order_id"])
@@ -617,7 +786,7 @@ def expire_stale_pending_bookings(hold_minutes: int = PENDING_HOLD_MINUTES) -> i
             except Exception:
                 pass
 
-    return len(stale_rows)
+    return expired_count
 
 
 def _parse_session_row(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
@@ -654,6 +823,7 @@ def list_available_slots(max_days_ahead: int = MAX_BOOKING_DAYS_AHEAD) -> List[D
     expire_stale_pending_bookings()
     conn = get_db_connection()
     now_dt = datetime.now(timezone.utc)
+    min_dt = now_dt + timedelta(hours=MIN_BOOKING_HOURS_AHEAD)
     max_dt = now_dt + timedelta(days=max_days_ahead)
     rows = conn.execute(
         """
@@ -663,7 +833,7 @@ def list_available_slots(max_days_ahead: int = MAX_BOOKING_DAYS_AHEAD) -> List[D
           AND start_time <= ?
         ORDER BY start_time ASC
         """,
-        (now_dt.isoformat(), max_dt.isoformat()),
+        (min_dt.isoformat(), max_dt.isoformat()),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -674,6 +844,7 @@ def list_window_slots(max_days_ahead: int = MAX_BOOKING_DAYS_AHEAD) -> List[Dict
     expire_stale_pending_bookings()
     conn = get_db_connection()
     now_dt = datetime.now(timezone.utc)
+    min_dt = now_dt + timedelta(hours=MIN_BOOKING_HOURS_AHEAD)
     max_dt = now_dt + timedelta(days=max_days_ahead)
     rows = conn.execute(
         """
@@ -682,7 +853,7 @@ def list_window_slots(max_days_ahead: int = MAX_BOOKING_DAYS_AHEAD) -> List[Dict
           AND start_time <= ?
         ORDER BY start_time ASC
         """,
-        (now_dt.isoformat(), max_dt.isoformat()),
+        (min_dt.isoformat(), max_dt.isoformat()),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -717,44 +888,6 @@ def create_slot(start_time_iso: str, end_time_iso: str) -> int:
     return int(slot_id)
 
 
-def create_bulk_slots(
-    weekdays: List[int],
-    hours_rome: List[int],
-    days_ahead: int = MAX_BOOKING_DAYS_AHEAD,
-    duration_minutes: int = 60,
-) -> int:
-    days_ahead = min(max(1, days_ahead), MAX_BOOKING_DAYS_AHEAD)
-    conn = get_db_connection()
-    cur = conn.cursor()
-    now_rome = datetime.now(ROME_TZ).replace(minute=0, second=0, microsecond=0)
-    added = 0
-
-    existing_starts = {
-        r["start_time"]
-        for r in conn.execute("SELECT start_time FROM availability_slots").fetchall()
-    }
-
-    for day_offset in range(1, days_ahead + 1):
-        day_rome = now_rome + timedelta(days=day_offset)
-        if day_rome.weekday() in weekdays:
-            for hr in hours_rome:
-                slot_start_rome = day_rome.replace(hour=hr, minute=0, second=0, microsecond=0)
-                slot_start_utc = slot_start_rome.astimezone(timezone.utc)
-                start_iso = slot_start_utc.isoformat()
-                if start_iso not in existing_starts:
-                    slot_end_utc = slot_start_utc + timedelta(minutes=duration_minutes)
-                    cur.execute(
-                        "INSERT INTO availability_slots (start_time, end_time, is_booked) VALUES (?, ?, 0)",
-                        (start_iso, slot_end_utc.isoformat()),
-                    )
-                    existing_starts.add(start_iso)
-                    added += 1
-
-    conn.commit()
-    conn.close()
-    return added
-
-
 def delete_slot(slot_id: int) -> bool:
     conn = get_db_connection()
     cur = conn.cursor()
@@ -784,6 +917,7 @@ def create_interview_session(
     client_ip: str = "",
     package_type: str = "single",
     youtube_consent: bool = False,
+    interview_mode: str = "classic_dsa",
 ) -> Dict[str, Any]:
     expire_stale_pending_bookings()
     session_id = str(uuid.uuid4())
@@ -798,6 +932,9 @@ def create_interview_session(
     yt_ts = created_at if youtube_consent else ""
     yt_ip = client_ip if youtube_consent else ""
     price_eur = compute_package_price_eur(pkg, youtube_consent)
+    mode_clean = str(interview_mode or "classic_dsa").strip().lower()
+    if mode_clean not in ("classic_dsa", "behavioral", "ai_multifile"):
+        mode_clean = "classic_dsa"
 
     conn = get_db_connection()
     try:
@@ -837,17 +974,30 @@ def create_interview_session(
                     "You already have pending unpaid bookings from your network. Please complete payment on your existing booking first."
                 )
 
-        starter_comments = {
-            "python": f"# Mock Interview Session — {candidate_name}\n# Target Role: {target_role} | Target Company: {target_company}\n\ndef solve():\n    pass\n",
-            "cpp": f"// Mock Interview Session — {candidate_name}\n// Target Role: {target_role} | Target Company: {target_company}\n\n#include <iostream>\n#include <vector>\nusing namespace std;\n\nint main() {{\n    return 0;\n}}\n",
-            "java": f"// Mock Interview Session — {candidate_name}\n// Target Role: {target_role} | Target Company: {target_company}\n\nimport java.util.*;\n\npublic class Solution {{\n    public static void main(String[] args) {{\n        \n    }}\n}}\n",
-            "javascript": f"// Mock Interview Session — {candidate_name}\n// Target Role: {target_role} | Target Company: {target_company}\n\nfunction solve() {{\n    \n}}\n",
-            "go": f"// Mock Interview Session — {candidate_name}\n// Target Role: {target_role} | Target Company: {target_company}\n\npackage main\n\nfunc main() {{\n    \n}}\n",
-        }
-        initial_code = starter_comments.get(
-            preferred_language,
-            f"// Mock Interview Session — {candidate_name}\n\n",
-        )
+        if mode_clean == "behavioral":
+            initial_code = (
+                f"# Behavioural Mock Interview — {candidate_name}\n"
+                f"# Target Role: {target_role} | Target Company: {target_company}\n\n"
+                "# Structure & Notes (STAR Method):\n"
+                "# ------------------------------------------------------------\n"
+                "# S - Situation: Context and problem background\n"
+                "# T - Task: What was your specific responsibility?\n"
+                "# A - Action: What did YOU do? What trade-offs were considered?\n"
+                "# R - Result: Quantifiable outcome and key takeaways\n\n"
+                "# Notes & Talking Points:\n"
+            )
+        else:
+            starter_comments = {
+                "python": f"# Mock Interview Session — {candidate_name}\n# Target Role: {target_role} | Target Company: {target_company}\n\ndef solve():\n    pass\n",
+                "cpp": f"// Mock Interview Session — {candidate_name}\n// Target Role: {target_role} | Target Company: {target_company}\n\n#include <iostream>\n#include <vector>\nusing namespace std;\n\nint main() {{\n    return 0;\n}}\n",
+                "java": f"// Mock Interview Session — {candidate_name}\n// Target Role: {target_role} | Target Company: {target_company}\n\nimport java.util.*;\n\npublic class Solution {{\n    public static void main(String[] args) {{\n        \n    }}\n}}\n",
+                "javascript": f"// Mock Interview Session — {candidate_name}\n// Target Role: {target_role} | Target Company: {target_company}\n\nfunction solve() {{\n    \n}}\n",
+                "go": f"// Mock Interview Session — {candidate_name}\n// Target Role: {target_role} | Target Company: {target_company}\n\npackage main\n\nfunc main() {{\n    \n}}\n",
+            }
+            initial_code = starter_comments.get(
+                preferred_language,
+                f"// Mock Interview Session — {candidate_name}\n\n",
+            )
 
         workspace_files = {
             "solution.txt": {
@@ -855,6 +1005,19 @@ def create_interview_session(
                 "language": preferred_language,
             }
         }
+
+        # Verify slot exists, is unbooked, and is at least MIN_BOOKING_HOURS_AHEAD (48h) in advance
+        slot_row = cur.execute(
+            "SELECT * FROM availability_slots WHERE id = ? AND is_booked = 0",
+            (slot_id,),
+        ).fetchone()
+        if not slot_row:
+            raise ValueError("Selected time slot is no longer available.")
+
+        min_booking_dt = now_utc + timedelta(hours=MIN_BOOKING_HOURS_AHEAD)
+        slot_start_dt = datetime.fromisoformat(slot_row["start_time"].replace("Z", "+00:00"))
+        if slot_start_dt < min_booking_dt:
+            raise ValueError("Appointments must be booked at least 48 hours in advance.")
 
         cur.execute(
             "UPDATE availability_slots SET is_booked = 1 WHERE id = ? AND is_booked = 0",
@@ -873,7 +1036,7 @@ def create_interview_session(
                 youtube_consent, youtube_consent_timestamp, youtube_consent_ip, price_eur,
                 interview_mode, syntax_highlighting_enabled, editor_language,
                 workspace_files, active_filename, ai_chat_logs
-            ) VALUES (?, ?, ?, 'PENDING_PAYMENT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 1, ?, ?, ?, ?, ?, 'classic_dsa', 0, ?, ?, 'solution.txt', '[]')
+            ) VALUES (?, ?, ?, 'PENDING_PAYMENT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 1, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'solution.txt', '[]')
             """,
             (
                 session_id,
@@ -895,6 +1058,7 @@ def create_interview_session(
                 yt_ts,
                 yt_ip,
                 price_eur,
+                mode_clean,
                 preferred_language,
                 json.dumps(workspace_files),
             ),
@@ -908,6 +1072,27 @@ def create_interview_session(
     return get_session_with_slot(session_id)
 
 
+def _apply_bundle_row(
+    item: Dict[str, Any],
+    *,
+    bundle_id: str,
+    bundle_code: Any,
+    token_nonce: Any,
+    legacy_token: Any,
+    revoked: Any,
+    credits_remaining: Any,
+    total_sessions: Any,
+) -> None:
+    item["bundle_code"] = bundle_code
+    nonce = token_nonce or ""
+    item["bundle_access_token"] = (
+        _derive_bundle_token(bundle_id, nonce) if nonce else (legacy_token or "")
+    )
+    item["bundle_revoked"] = bool(revoked)
+    item["bundle_credits_remaining"] = int(credits_remaining)
+    item["bundle_total_sessions"] = int(total_sessions)
+
+
 def _attach_bundle_metadata(conn: sqlite3.Connection, item: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not item:
         return None
@@ -915,17 +1100,45 @@ def _attach_bundle_metadata(conn: sqlite3.Connection, item: Optional[Dict[str, A
     if bundle_id:
         try:
             b_row = conn.execute(
-                "SELECT bundle_code, access_token, credits_remaining, total_sessions, revoked FROM booking_bundles WHERE id = ?",
+                """
+                SELECT id, bundle_code, access_token, token_nonce, credits_remaining,
+                       total_sessions, revoked
+                FROM booking_bundles WHERE id = ?
+                """,
                 (bundle_id,),
             ).fetchone()
             if b_row:
-                item["bundle_code"] = b_row["bundle_code"]
-                item["bundle_access_token"] = b_row["access_token"]
-                item["bundle_revoked"] = bool(b_row["revoked"])
-                item["bundle_credits_remaining"] = int(b_row["credits_remaining"])
-                item["bundle_total_sessions"] = int(b_row["total_sessions"])
+                _apply_bundle_row(
+                    item,
+                    bundle_id=bundle_id,
+                    bundle_code=b_row["bundle_code"],
+                    token_nonce=b_row["token_nonce"],
+                    legacy_token=b_row["access_token"],
+                    revoked=b_row["revoked"],
+                    credits_remaining=b_row["credits_remaining"],
+                    total_sessions=b_row["total_sessions"],
+                )
         except Exception:
             pass
+    return item
+
+
+def _attach_joined_bundle_metadata(item: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Uses the bundle columns already loaded by `list_sessions_by_category`."""
+    if not item or not item.get("bundle_id"):
+        return item
+    if "bundle_code_joined" not in item:
+        return item
+    _apply_bundle_row(
+        item,
+        bundle_id=item["bundle_id"],
+        bundle_code=item.get("bundle_code_joined"),
+        token_nonce=item.get("bundle_token_nonce"),
+        legacy_token=item.get("bundle_legacy_token"),
+        revoked=item.get("bundle_revoked_joined"),
+        credits_remaining=item.get("bundle_credits_remaining_joined") or 0,
+        total_sessions=item.get("bundle_total_sessions_joined") or 0,
+    )
     return item
 
 
@@ -973,9 +1186,16 @@ def list_sessions_by_category() -> Dict[str, List[Dict[str, Any]]]:
     _ensure_schema_columns(conn.cursor())
     rows = conn.execute(
         """
-        SELECT i.*, s.start_time, s.end_time
+        SELECT i.*, s.start_time, s.end_time,
+               b.bundle_code AS bundle_code_joined,
+               b.access_token AS bundle_legacy_token,
+               b.token_nonce AS bundle_token_nonce,
+               b.revoked AS bundle_revoked_joined,
+               b.credits_remaining AS bundle_credits_remaining_joined,
+               b.total_sessions AS bundle_total_sessions_joined
         FROM interview_sessions i
         JOIN availability_slots s ON s.id = i.slot_id
+        LEFT JOIN booking_bundles b ON b.id = i.bundle_id
         ORDER BY s.start_time ASC
         """
     ).fetchall()
@@ -987,7 +1207,7 @@ def list_sessions_by_category() -> Dict[str, List[Dict[str, Any]]]:
 
     for r in rows:
         item = _parse_session_row(r)
-        item = _attach_bundle_metadata(conn, item)
+        item = _attach_joined_bundle_metadata(item)
         if not item:
             continue
         status = item["status"]
@@ -999,7 +1219,10 @@ def list_sessions_by_category() -> Dict[str, List[Dict[str, Any]]]:
             past.append(item)
 
     conn.close()
-    past.sort(key=lambda x: x["start_time"], reverse=True)
+    # Sort past interviews: pending judgments (breakdown not yet sent) come first,
+    # followed by interviews with judgment sent, each subgroup ordered descending by date.
+    past.sort(key=lambda x: x.get("start_time") or "", reverse=True)
+    past.sort(key=lambda x: 1 if x.get("breakdown_sent_at") else 0)
     return {
         "pending": pending,
         "upcoming": upcoming,
@@ -1094,7 +1317,7 @@ def confirm_paid_session(
 
         status = row["status"]
         slot_id = int(row["slot_id"])
-        expected_minor = int(row["price_eur"] or 70) * 100
+        expected_minor = int(row["price_eur"] or settings.PRICE_SINGLE_STANDARD_EUR) * 100
         if amount_minor is not None and amount_minor < expected_minor:
             conn.rollback()
             raise ValueError(
@@ -1186,7 +1409,7 @@ def ensure_bundle_for_paid_session(session_id: str) -> Optional[Dict[str, Any]]:
 
     bundle_id = str(uuid.uuid4())
     bundle_code = "SH-" + secrets.token_hex(4).upper()
-    raw_token, token_hash = generate_bundle_token()
+    _, token_hash, token_nonce = generate_bundle_token(bundle_id)
     now_iso = datetime.now(timezone.utc).isoformat()
 
     conn = get_db_connection()
@@ -1196,19 +1419,19 @@ def ensure_bundle_for_paid_session(session_id: str) -> Optional[Dict[str, Any]]:
         cur.execute(
             """
             INSERT INTO booking_bundles (
-                id, bundle_code, access_token_hash, access_token, revoked,
+                id, bundle_code, access_token_hash, access_token, token_nonce, revoked,
                 candidate_name, candidate_email,
                 leetcode_solved, target_company, preferred_language, target_role,
                 total_sessions, credits_remaining, youtube_consent,
                 youtube_consent_timestamp, youtube_consent_ip, price_eur,
                 email_message_id, email_subject, created_at
-            ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 3, 2, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, '', ?, 0, ?, ?, ?, ?, ?, ?, 3, 2, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 bundle_id,
                 bundle_code,
                 token_hash,
-                raw_token,
+                token_nonce,
                 session["candidate_name"],
                 session["candidate_email"],
                 session["leetcode_solved"],
@@ -1241,6 +1464,19 @@ def ensure_bundle_for_paid_session(session_id: str) -> Optional[Dict[str, Any]]:
     return get_session_with_slot(session_id)
 
 
+def _bundle_public_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    d = dict(row)
+    d["youtube_consent"] = bool(d.get("youtube_consent", 0))
+    d["revoked"] = bool(d.get("revoked", 0))
+    nonce = d.get("token_nonce") or ""
+    d["access_token"] = (
+        _derive_bundle_token(d["id"], nonce)
+        if nonce
+        else (d.get("access_token") or "")
+    )
+    return d
+
+
 def get_bundle(bundle_id: str) -> Optional[Dict[str, Any]]:
     conn = get_db_connection()
     _ensure_schema_columns(conn.cursor())
@@ -1248,43 +1484,52 @@ def get_bundle(bundle_id: str) -> Optional[Dict[str, Any]]:
     conn.close()
     if not row:
         return None
-    d = dict(row)
-    d["youtube_consent"] = bool(d.get("youtube_consent", 0))
-    d["revoked"] = bool(d.get("revoked", 0))
-    return d
+    return _bundle_public_dict(row)
 
 
 def get_bundle_by_token(access_token: str) -> Optional[Dict[str, Any]]:
     tok = (access_token or "").strip()
     if not tok:
         return None
-    tok_hash = hash_token(tok)
+
     conn = get_db_connection()
     _ensure_schema_columns(conn.cursor())
-    row = conn.execute(
-        "SELECT * FROM booking_bundles WHERE access_token_hash = ? AND revoked = 0",
-        (tok_hash,),
-    ).fetchone()
+    row = None
+
+    parsed = parse_bundle_token(tok)
+    if parsed:
+        bundle_id, nonce = parsed
+        candidate = conn.execute(
+            "SELECT * FROM booking_bundles WHERE id = ? AND revoked = 0",
+            (bundle_id,),
+        ).fetchone()
+        if candidate and (candidate["token_nonce"] or "") == nonce:
+            row = candidate
+
+    # Legacy hash lookup for bundles created before derived tokens.
+    if row is None:
+        row = conn.execute(
+            "SELECT * FROM booking_bundles WHERE access_token_hash = ? AND revoked = 0",
+            (hash_token(tok),),
+        ).fetchone()
+
     conn.close()
     if not row:
         return None
-    d = dict(row)
-    d["youtube_consent"] = bool(d.get("youtube_consent", 0))
-    d["revoked"] = bool(d.get("revoked", 0))
-    return d
+    return _bundle_public_dict(row)
 
 
 def rotate_bundle_token(bundle_id: str, revoke: bool = False) -> Optional[Dict[str, Any]]:
-    raw_tok, tok_hash = generate_bundle_token()
+    _, tok_hash, token_nonce = generate_bundle_token(bundle_id)
     conn = get_db_connection()
     _ensure_schema_columns(conn.cursor())
     conn.execute(
         """
         UPDATE booking_bundles
-        SET access_token = ?, access_token_hash = ?, revoked = ?
+        SET access_token = '', access_token_hash = ?, token_nonce = ?, revoked = ?
         WHERE id = ?
         """,
-        (raw_tok, tok_hash, 1 if revoke else 0, bundle_id),
+        (tok_hash, token_nonce, 1 if revoke else 0, bundle_id),
     )
     conn.commit()
     conn.close()
@@ -1312,18 +1557,7 @@ def find_active_bundles_by_email(email_str: str) -> List[Dict[str, Any]]:
         (q,),
     ).fetchall()
     conn.close()
-    results = []
-    for r in rows:
-        d = dict(r)
-        d["youtube_consent"] = bool(d.get("youtube_consent", 0))
-        d["revoked"] = bool(d.get("revoked", 0))
-        results.append(d)
-    return results
-
-
-def find_active_bundles_by_email_or_code(query_str: str) -> List[Dict[str, Any]]:
-    """Backwards-compatible alias restricted to email lookup."""
-    return find_active_bundles_by_email(query_str)
+    return [_bundle_public_dict(r) for r in rows]
 
 
 def book_bundle_credit_session(
@@ -1335,6 +1569,7 @@ def book_bundle_credit_session(
     preferred_language: str,
     leetcode_solved: int,
     client_ip: str = "",
+    interview_mode: str = "classic_dsa",
 ) -> Dict[str, Any]:
     """
     Uses 1 remaining credit from an existing paid 3-Mock Bundle to immediately
@@ -1344,6 +1579,9 @@ def book_bundle_credit_session(
     session_id = str(uuid.uuid4())
     interviewer_secret = secrets.token_urlsafe(24)
     created_at = datetime.now(timezone.utc).isoformat()
+    mode_clean = str(interview_mode or "classic_dsa").strip().lower()
+    if mode_clean not in ("classic_dsa", "behavioral", "ai_multifile"):
+        mode_clean = "classic_dsa"
 
     conn = get_db_connection()
     try:
@@ -1365,6 +1603,19 @@ def book_bundle_credit_session(
         total_sessions = int(bundle.get("total_sessions") or 3)
         session_number = total_sessions - credits_left + 1
 
+        # Verify slot exists, is unbooked, and is at least MIN_BOOKING_HOURS_AHEAD (48h) in advance
+        slot_row = cur.execute(
+            "SELECT * FROM availability_slots WHERE id = ? AND is_booked = 0",
+            (slot_id,),
+        ).fetchone()
+        if not slot_row:
+            raise ValueError("Selected time slot is no longer available.")
+
+        min_booking_dt = datetime.now(timezone.utc) + timedelta(hours=MIN_BOOKING_HOURS_AHEAD)
+        slot_start_dt = datetime.fromisoformat(slot_row["start_time"].replace("Z", "+00:00"))
+        if slot_start_dt < min_booking_dt:
+            raise ValueError("Appointments must be booked at least 48 hours in advance.")
+
         cur.execute(
             "UPDATE availability_slots SET is_booked = 1 WHERE id = ? AND is_booked = 0",
             (slot_id,),
@@ -1379,17 +1630,30 @@ def book_bundle_credit_session(
         if cur.rowcount == 0:
             raise ValueError("No remaining credits in this bundle.")
 
-        starter_comments = {
-            "python": f"# Mock Interview Session #{session_number} — {candidate_name}\n# Target Role: {target_role} | Target Company: {target_company}\n\ndef solve():\n    pass\n",
-            "cpp": f"// Mock Interview Session #{session_number} — {candidate_name}\n// Target Role: {target_role} | Target Company: {target_company}\n\n#include <iostream>\n#include <vector>\nusing namespace std;\n\nint main() {{\n    return 0;\n}}\n",
-            "java": f"// Mock Interview Session #{session_number} — {candidate_name}\n// Target Role: {target_role} | Target Company: {target_company}\n\nimport java.util.*;\n\npublic class Solution {{\n    public static void main(String[] args) {{\n        \n    }}\n}}\n",
-            "javascript": f"// Mock Interview Session #{session_number} — {candidate_name}\n// Target Role: {target_role} | Target Company: {target_company}\n\nfunction solve() {{\n    \n}}\n",
-            "go": f"// Mock Interview Session #{session_number} — {candidate_name}\n// Target Role: {target_role} | Target Company: {target_company}\n\npackage main\n\nfunc main() {{\n    \n}}\n",
-        }
-        initial_code = starter_comments.get(
-            preferred_language,
-            f"// Mock Interview Session #{session_number} — {candidate_name}\n\n",
-        )
+        if mode_clean == "behavioral":
+            initial_code = (
+                f"# Behavioural Mock Interview #{session_number} — {candidate_name}\n"
+                f"# Target Role: {target_role} | Target Company: {target_company}\n\n"
+                "# Structure & Notes (STAR Method):\n"
+                "# ------------------------------------------------------------\n"
+                "# S - Situation: Context and problem background\n"
+                "# T - Task: What was your specific responsibility?\n"
+                "# A - Action: What did YOU do? What trade-offs were considered?\n"
+                "# R - Result: Quantifiable outcome and key takeaways\n\n"
+                "# Notes & Talking Points:\n"
+            )
+        else:
+            starter_comments = {
+                "python": f"# Mock Interview Session #{session_number} — {candidate_name}\n# Target Role: {target_role} | Target Company: {target_company}\n\ndef solve():\n    pass\n",
+                "cpp": f"// Mock Interview Session #{session_number} — {candidate_name}\n// Target Role: {target_role} | Target Company: {target_company}\n\n#include <iostream>\n#include <vector>\nusing namespace std;\n\nint main() {{\n    return 0;\n}}\n",
+                "java": f"// Mock Interview Session #{session_number} — {candidate_name}\n// Target Role: {target_role} | Target Company: {target_company}\n\nimport java.util.*;\n\npublic class Solution {{\n    public static void main(String[] args) {{\n        \n    }}\n}}\n",
+                "javascript": f"// Mock Interview Session #{session_number} — {candidate_name}\n// Target Role: {target_role} | Target Company: {target_company}\n\nfunction solve() {{\n    \n}}\n",
+                "go": f"// Mock Interview Session #{session_number} — {candidate_name}\n// Target Role: {target_role} | Target Company: {target_company}\n\npackage main\n\nfunc main() {{\n    \n}}\n",
+            }
+            initial_code = starter_comments.get(
+                preferred_language,
+                f"// Mock Interview Session #{session_number} — {candidate_name}\n\n",
+            )
         workspace_files = {
             "solution.txt": {
                 "content": initial_code,
@@ -1408,7 +1672,7 @@ def book_bundle_credit_session(
                 email_message_id, email_subject,
                 interview_mode, syntax_highlighting_enabled, editor_language,
                 workspace_files, active_filename, ai_chat_logs
-            ) VALUES (?, ?, ?, 'CONFIRMED', ?, ?, ?, ?, ?, ?, ?, ?, '', 'bundle_3', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'classic_dsa', 0, ?, ?, 'solution.txt', '[]')
+            ) VALUES (?, ?, ?, 'CONFIRMED', ?, ?, ?, ?, ?, ?, ?, ?, '', 'bundle_3', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'solution.txt', '[]')
             """,
             (
                 session_id,
@@ -1431,6 +1695,7 @@ def book_bundle_credit_session(
                 int(bundle.get("price_eur") or settings.PRICE_BUNDLE3_STANDARD_EUR),
                 bundle.get("email_message_id"),
                 bundle.get("email_subject"),
+                mode_clean,
                 preferred_language,
                 json.dumps(workspace_files),
             ),
@@ -1583,7 +1848,8 @@ def reschedule_interview_session(session_id: str, new_slot_id: int) -> Dict[str,
     """
     expire_stale_pending_bookings()
     now_dt = datetime.now(timezone.utc)
-    now_iso = now_dt.isoformat()
+    min_dt = now_dt + timedelta(hours=MIN_BOOKING_HOURS_AHEAD)
+    min_iso = min_dt.isoformat()
     max_iso = (now_dt + timedelta(days=MAX_BOOKING_DAYS_AHEAD)).isoformat()
 
     conn = get_db_connection()
@@ -1612,10 +1878,10 @@ def reschedule_interview_session(session_id: str, new_slot_id: int) -> Dict[str,
             SELECT * FROM availability_slots
             WHERE id = ? AND is_booked = 0 AND start_time >= ? AND start_time <= ?
             """,
-            (new_slot_id, now_iso, max_iso),
+            (new_slot_id, min_iso, max_iso),
         ).fetchone()
         if not slot_row:
-            raise ValueError("Selected time slot is no longer available.")
+            raise ValueError("Selected time slot is no longer available (must be at least 48 hours in advance).")
 
         cur.execute(
             "UPDATE availability_slots SET is_booked = 1 WHERE id = ? AND is_booked = 0",

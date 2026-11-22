@@ -7,11 +7,28 @@
     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-zinc-200 pb-5">
         <div>
             <a href="/admin?tab=past" class="text-xs font-medium text-zinc-500 hover:text-zinc-900">&larr; Back to Admin Panel</a>
-            <h1 class="text-2xl font-bold text-zinc-900 mt-1">
-                Breakdown &amp; Judgement: {{ session.candidate_name }}
+            <h1 class="text-2xl font-bold text-zinc-900 mt-1 flex flex-wrap items-center gap-2">
+                <span>Breakdown &amp; Judgement: {{ session.candidate_name }}</span>
+                {% if session.interview_mode == 'behavioral' %}
+                <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-purple-50 text-purple-700 border border-purple-200">
+                    Behavioural
+                </span>
+                {% elif session.interview_mode == 'ai_multifile' %}
+                <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200">
+                    AI-Assisted
+                </span>
+                {% else %}
+                <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-zinc-100 text-zinc-700 border border-zinc-200">
+                    Coding DSA
+                </span>
+                {% endif %}
+                {% if session.breakdown_sent_at %}
+                <span class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-600 text-white">Read-only</span>
+                {% endif %}
             </h1>
             <p class="text-xs text-zinc-500 mt-1">
-                Target: <strong class="text-zinc-900">{{ session.target_role }} @ {{ session.target_company }}</strong>
+                Type: <strong class="text-zinc-900">{% if session.interview_mode == 'behavioral' %}Behavioural{% elif session.interview_mode == 'ai_multifile' %}AI-Assisted{% else %}Coding DSA{% endif %}</strong>
+                &bull; Target: <strong class="text-zinc-900">{{ session.target_role }} @ {{ session.target_company }}</strong>
                 &bull; Language: <strong class="text-zinc-900">{{ session.preferred_language | upper }}</strong>
                 &bull; LeetCode Solved: <strong class="text-zinc-900">{{ session.leetcode_solved }}</strong>
             </p>
@@ -39,22 +56,53 @@
     </div>
     {% endif %}
 
+    {% if session.breakdown_sent_at %}
+    <div class="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-sm space-y-1">
+        <p class="font-semibold">Judgement sent &mdash; this breakdown is locked.</p>
+        <p class="text-xs text-emerald-800">
+            Published on {{ session.breakdown_sent_at[:19].replace('T', ' ') }} UTC.
+            The rubric, verdict, and recap can no longer be edited. You can still resend the same feedback link.
+        </p>
+    </div>
+    {% endif %}
+
     <div class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
         <!-- Left 8 Cols: Feedback Breakdown + Final Verdict + Final Recap Form -->
         <div class="lg:col-span-8 space-y-6">
+            {% if session.breakdown_sent_at %}
+            <div class="rounded-2xl bg-white border border-zinc-200 p-6 sm:p-8 shadow-2xs space-y-6">
+            {% else %}
             <form action="/admin/session/{{ session.id }}/save" method="POST" class="rounded-2xl bg-white border border-zinc-200 p-6 sm:p-8 shadow-2xs space-y-6">
+                <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}" />
+            {% endif %}
                 <div class="flex items-center justify-between border-b border-zinc-100 pb-4">
                     <div>
-                        <h2 class="text-base font-bold text-zinc-900">Feedback Breakdown (Sections 1–5)</h2>
-                        <p class="text-xs text-zinc-500">All fields are displayed on the candidate's session feedback page.</p>
+                        <h2 class="text-base font-bold text-zinc-900">
+                            Feedback Breakdown (Sections 1–5){% if session.breakdown_sent_at %} &mdash; Read-only{% endif %}
+                        </h2>
+                        <p class="text-xs text-zinc-500">
+                            {% if session.breakdown_sent_at %}
+                            This published breakdown is preserved exactly as the candidate received it.
+                            {% else %}
+                            All fields are displayed on the candidate's session feedback page.
+                            {% endif %}
+                        </p>
                     </div>
+                    {% if not session.breakdown_sent_at %}
                     <button
                         type="submit"
                         class="px-4 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-white font-semibold text-xs transition"
                     >
                         Save Changes
                     </button>
+                    {% else %}
+                    <span class="px-2.5 py-1 rounded-lg bg-zinc-100 text-zinc-500 border border-zinc-200 text-[11px] font-medium">
+                        Locked after sending
+                    </span>
+                    {% endif %}
                 </div>
+
+                <fieldset {% if session.breakdown_sent_at %}disabled{% endif %} class="space-y-6 border-0 p-0 m-0 min-w-0">
 
                 <!-- Final Hiring Verdict / Result Selector -->
                 <div class="p-4 rounded-xl bg-zinc-50 border border-zinc-200 space-y-2">
@@ -183,6 +231,9 @@
                     >{{ session.final_recap_and_next_steps }}</textarea>
                 </div>
 
+                </fieldset>
+
+                {% if not session.breakdown_sent_at %}
                 <div class="flex items-center justify-end pt-2">
                     <button
                         type="submit"
@@ -191,15 +242,22 @@
                         Save Feedback Breakdown &amp; Judgement
                     </button>
                 </div>
-            </form>
+                {% endif %}
+            {% if session.breakdown_sent_at %}</div>{% else %}</form>{% endif %}
         </div>
 
         <!-- Right 4 Cols: Same-Thread Email Delivery + Code Snapshot -->
         <div class="lg:col-span-4 space-y-6">
             <div class="rounded-2xl bg-white border border-zinc-200 p-6 shadow-2xs space-y-4">
-                <h3 class="text-sm font-bold text-zinc-900">Send Breakdown Page Link in Email Thread</h3>
+                <h3 class="text-sm font-bold text-zinc-900">
+                    {% if session.breakdown_sent_at %}Breakdown Delivery{% else %}Send Breakdown Page Link in Email Thread{% endif %}
+                </h3>
                 <p class="text-xs text-zinc-500 leading-relaxed">
+                    {% if session.breakdown_sent_at %}
+                    The published content is locked. Resending only delivers the same feedback link again in the original thread.
+                    {% else %}
                     Sends <strong>Email #2</strong> containing the direct link to <code class="text-zinc-800 font-mono">/feedback/{{ session.id[:8] }}...</code> with matching <code class="text-zinc-800 font-mono">In-Reply-To</code> and <code class="text-zinc-800 font-mono">References</code> headers so it lands inside the candidate's original calendar invite thread.
+                    {% endif %}
                 </p>
 
                 <div class="rounded-xl bg-zinc-50 border border-zinc-200 p-3.5 text-xs space-y-1.5 font-mono text-zinc-600">
@@ -213,12 +271,14 @@
                     {% endif %}
                 </div>
 
-                <form action="/admin/session/{{ session.id }}/send-breakdown" method="POST" onsubmit="return confirm('Send the candidate breakdown page link in the email thread now?');">
+                <form action="/admin/session/{{ session.id }}/send-breakdown" method="POST" onsubmit="return confirm('{% if session.breakdown_sent_at %}Resend the same feedback link in the email thread? The content will not change.{% else %}Send the candidate breakdown page link in the email thread now?{% endif %}');">
+
+                    <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}" />
                     <button
                         type="submit"
-                        class="w-full py-3 px-4 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-white font-semibold text-xs transition flex items-center justify-center gap-2 cursor-pointer"
+                        class="w-full py-3 px-4 rounded-xl {% if session.breakdown_sent_at %}bg-white hover:bg-zinc-50 text-zinc-700 border border-zinc-200{% else %}bg-zinc-900 hover:bg-zinc-800 text-white{% endif %} font-semibold text-xs transition flex items-center justify-center gap-2 cursor-pointer"
                     >
-                        <span>Send Breakdown Link in Email Thread</span>
+                        <span>{% if session.breakdown_sent_at %}Resend Breakdown Link{% else %}Send Breakdown Link in Email Thread{% endif %}</span>
                         <span>&rarr;</span>
                     </button>
                 </form>

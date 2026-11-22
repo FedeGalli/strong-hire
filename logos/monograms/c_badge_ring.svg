@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="800" viewBox="0 0 800 800"><rect width="800" height="800" fill="#000"/>
+<defs><path id="ring" d="M 400 400 m -290 0 a 290 290 0 1 1 580 0 a 290 290 0 1 1 -580 0"/></defs>
+<circle cx="400" cy="400" r="345" fill="none" stroke="#fff" stroke-width="6"/>
+<circle cx="400" cy="400" r="235" fill="none" stroke="#3f3f46" stroke-width="3"/>
+<text font-family="ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace" font-size="38" font-weight="600" fill="#fff">
+  <textPath href="#ring" startOffset="0" textLength="1805" lengthAdjust="spacing">STRONG HIRE · SWE MOCK INTERVIEWS ·</textPath></text>
+<text x="400" y="400" text-anchor="middle" dominant-baseline="central" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif" font-size="250" font-weight="900" letter-spacing="-10" fill="#fff">SH</text></svg>

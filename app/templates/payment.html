@@ -15,7 +15,7 @@
                 ytDiscount: {{ 'true' if session.youtube_consent else 'false' }},
                 explicitLegalConsent: {{ 'true' if session.youtube_consent else 'false' }},
                 get standardPrice() { return this.pkg === 'bundle_3' ? {{ settings.PRICE_BUNDLE3_STANDARD_EUR }} : {{ settings.PRICE_SINGLE_STANDARD_EUR }}; },
-                get discountedPrice() { return Math.round(this.standardPrice * 0.8); },
+                get discountedPrice() { return this.pkg === 'bundle_3' ? {{ settings.PRICE_BUNDLE3_YOUTUBE_EUR }} : {{ settings.PRICE_SINGLE_YOUTUBE_EUR }}; },
                 get finalPrice() { return this.ytDiscount ? this.discountedPrice : this.standardPrice; }
             }"
             class="space-y-7"
@@ -58,6 +58,8 @@
             </div>
 
             <form action="/booking/{{ session.id }}/checkout" method="POST" class="space-y-6">
+
+                <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}" />
                 <input type="hidden" name="package_type" :value="pkg" />
                 <input type="hidden" name="youtube_consent" :value="ytDiscount ? '1' : '0'" />
 
@@ -73,7 +75,7 @@
                         >
                             <div class="flex items-center justify-between w-full">
                                 <span class="text-sm font-bold">1 Mock Interview</span>
-                                <span class="text-base font-bold font-mono">&euro;{{ settings.PRICE_SINGLE_STANDARD_EUR }}</span>
+                                <span class="text-base font-bold font-mono" x-text="'€' + (ytDiscount ? {{ settings.PRICE_SINGLE_YOUTUBE_EUR }} : {{ settings.PRICE_SINGLE_STANDARD_EUR }})">&euro;{{ settings.PRICE_SINGLE_STANDARD_EUR }}</span>
                             </div>
                             <p class="text-xs mt-1.5 leading-relaxed" :class="pkg === 'single' ? 'text-zinc-300' : 'text-zinc-500'">
                                 Confirms your selected slot above for a single 60-min session + Feedback Breakdown.
@@ -89,12 +91,12 @@
                             <div class="flex items-center justify-between w-full">
                                 <div class="flex items-center gap-1.5">
                                     <span class="text-sm font-bold">3-Mock Bundle</span>
-                                    <span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500 text-white">SAVE</span>
+                                    <span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500 text-white">SAVE {{ settings.BUNDLE3_DISCOUNT_PERCENT }}%</span>
                                 </div>
-                                <span class="text-base font-bold font-mono">&euro;{{ settings.PRICE_BUNDLE3_STANDARD_EUR }}</span>
+                                <span class="text-base font-bold font-mono" x-text="'€' + (ytDiscount ? {{ settings.PRICE_BUNDLE3_YOUTUBE_EUR }} : {{ settings.PRICE_BUNDLE3_STANDARD_EUR }})">&euro;{{ settings.PRICE_BUNDLE3_STANDARD_EUR }}</span>
                             </div>
                             <p class="text-xs mt-1.5 leading-relaxed" :class="pkg === 'bundle_3' ? 'text-zinc-300' : 'text-zinc-500'">
-                                Confirms your selected slot above as <strong>Session #1</strong>, and emails you a link + code to book <strong>Sessions #2 &amp; #3 whenever you want later</strong>.
+                                Confirms your selected slot above as <strong>Session #1</strong>, book the <strong>Sessions #2 &amp; #3 whenever you want later</strong>.
                             </p>
                         </button>
                     </div>
@@ -115,14 +117,14 @@
                         <div class="flex-1 space-y-1">
                             <div class="flex flex-wrap items-center justify-between gap-2">
                                 <span class="text-sm font-bold text-zinc-900">
-                                    Get an Instant 20% Discount: Allow Publishing on YouTube
+                                    Get an Instant {{ settings.YOUTUBE_DISCOUNT_PERCENT }}% Discount: Allow Publishing on YouTube
                                 </span>
                                 <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-                                    20% OFF
+                                    {{ settings.YOUTUBE_DISCOUNT_PERCENT }}% OFF
                                 </span>
                             </div>
                             <p class="text-xs text-zinc-600 leading-relaxed">
-                                Receive an instant <strong>20% off</strong> your selected package by allowing us to record and publish your 1-hour mock interview on YouTube.
+                                Receive an instant <strong>{{ settings.YOUTUBE_DISCOUNT_PERCENT }}% off</strong> your selected package by allowing us to record and publish your 1-hour mock interview on YouTube.
                             </p>
                         </div>
                     </label>
@@ -137,10 +139,10 @@
                                 <strong>1. Explicit Consent to Record &amp; Publish (GDPR Art. 6(1)(a) &amp; Art. 7):</strong> By enabling this discount, you explicitly authorize {{ settings.APP_TITLE }} (the Data Controller &amp; Producer) to record your 60-minute mock interview session(s) (including voice, audio, shared coding workspace, and video if enabled) and to edit, adapt, reproduce, distribute, and publicly communicate the recording in full or in excerpts (including Shorts/clips) on <strong>YouTube</strong> and affiliated educational/social media platforms worldwide and without time limitation. Your email address, phone number, and private contact details will never be published.
                             </p>
                             <p>
-                                <strong>2. Assignment of Rights &amp; Complete Waiver of Monetization:</strong> In exchange for the immediate upfront 20% fee discount, which you acknowledge as fair, full, and final consideration under applicable European Union and national copyright and image/voice rights laws, you irrevocably grant {{ settings.APP_TITLE }} an exclusive, worldwide, royalty-free license to commercialize the recording and <strong>expressly waive any right to YouTube Partner Program advertising revenue, sponsorships, royalties, residuals, or any other financial remuneration</strong> generated by the video(s).
+                                <strong>2. Assignment of Rights &amp; Complete Waiver of Monetization:</strong> In exchange for the immediate upfront {{ settings.YOUTUBE_DISCOUNT_PERCENT }}% fee discount, which you acknowledge as fair, full, and final consideration under applicable European Union and national copyright and image/voice rights laws, you irrevocably grant {{ settings.APP_TITLE }} an exclusive, worldwide, royalty-free license to commercialize the recording and <strong>expressly waive any right to YouTube Partner Program advertising revenue, sponsorships, royalties, residuals, or any other financial remuneration</strong> generated by the video(s).
                             </p>
                             <p>
-                                <strong>3. Right of Withdrawal &amp; Fee Adjustment:</strong> Pursuant to GDPR Art. 7(3), you may withdraw your consent at any time by written notice to {{ settings.ADMIN_EMAIL }} (without affecting the lawfulness of prior publication); if you request keepsake/private status or removal, you agree to reimburse the 20% promotional discount difference to convert your booking to a standard private session.
+                                <strong>3. Right of Withdrawal &amp; Fee Adjustment:</strong> Pursuant to GDPR Art. 7(3), you may withdraw your consent at any time by written notice to {{ settings.ADMIN_EMAIL }} (without affecting the lawfulness of prior publication); if you request keepsake/private status or removal, you agree to reimburse the {{ settings.YOUTUBE_DISCOUNT_PERCENT }}% promotional discount difference to convert your booking to a standard private session.
                             </p>
                         </div>
 
@@ -175,14 +177,14 @@
                             </div>
                         </div>
                         <p class="text-xs text-zinc-300 mt-3 leading-relaxed">
-                            Revolut Pro Checkout &bull; Card / Apple Pay / Google Pay
+                            Card / Apple Pay / Google Pay
                         </p>
                     </button>
                 </div>
             </form>
 
-            {% if active_order_id and not revolut_live_mode %}
-            <!-- Local Dev / Sandbox Revolut Webhook Simulator (only shown when REVOLUT_API_KEY is empty) -->
+            {% if active_order_id and show_mock_pay %}
+            <!-- Local Dev / Sandbox Revolut Webhook Simulator -->
             <div class="rounded-xl bg-amber-50/80 border border-amber-200 p-4 space-y-2.5 text-xs">
                 <div class="flex items-center justify-between gap-2">
                     <span class="font-bold text-amber-900">
@@ -196,6 +198,7 @@
                     In production, Revolut sends a signed <code class="font-mono">ORDER_COMPLETED</code> webhook to <code class="font-mono">/webhooks/revolut</code> automatically once the card/Apple Pay payment completes. In local dev mode, click below to dispatch the signed webhook:
                 </p>
                 <form action="/api/dev/revolut/simulate-webhook/{{ session.id }}" method="POST">
+                    <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}" />
                     <button
                         type="submit"
                         class="px-4 py-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-white font-semibold text-xs transition cursor-pointer"
@@ -220,7 +223,7 @@
                 You're all set, {{ session.candidate_name }}!
             </h1>
             <p class="text-sm text-zinc-600 leading-relaxed">
-                Your 1-on-1 Software Engineering Mock Interview is confirmed, and a copy of this invitation (with a calendar <code>.ics</code> attachment) has been sent to your email. Below you will find your session summary, direct links to the video call and shared coding workspace, and how to prepare.
+                Your 1-on-1 Software Engineering Mock Interview is confirmed, and a calendar invite is attached to the email. Below you will find your session summary, direct links to the video call and shared coding workspace, and how to prepare.
             </p>
         </div>
 
@@ -278,7 +281,7 @@
                     href="/booking/{{ session.id }}/ics"
                     class="w-full py-2.5 px-4 rounded-xl bg-white hover:bg-zinc-100 text-zinc-900 border border-zinc-200 font-semibold text-xs text-center transition block"
                 >
-                    Download Calendar Invite (.ics)
+                    Download Calendar Invite
                 </a>
             </div>
         </div>

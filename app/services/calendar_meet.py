@@ -1,5 +1,5 @@
 import logging
-import uuid
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
@@ -27,6 +27,14 @@ def create_google_meet_event(
     candidate_email = session["candidate_email"]
     start_time_str = session["start_time"]
     end_time_str = session["end_time"]
+
+    # In test environments, never contact the live Google Calendar API or send calendar invites
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("TESTING") == "1":
+        logger.info(
+            "Test environment detected; skipping live Google Calendar invite for session %s",
+            session.get("id"),
+        )
+        return f"mock-cal-event-{session.get('id', 'test')[:8]}", custom_meet_url or "https://meet.google.com/test-mock-interview"
 
     if settings.GOOGLE_TOKEN_FILE.exists():
         try:

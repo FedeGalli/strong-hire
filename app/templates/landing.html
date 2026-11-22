@@ -2,12 +2,9 @@
 {% block title %}{{ settings.APP_TITLE }} — 1-on-1 SWE Mock Interviews &amp; Personalized Study Plan{% endblock %}
 
 {% block content %}
-<div class="bg-white animate-slide-up" x-data="{ leavingToBook: false }">
+<div class="bg-white animate-slide-up">
     <!-- Minimalist Hero Section -->
-    <section
-        class="max-w-4xl mx-auto px-4 sm:px-6 pt-16 pb-20 sm:pt-24 sm:pb-24 text-center transition-all duration-300 ease-in-out"
-        :class="leavingToBook ? 'opacity-0 -translate-x-10' : 'opacity-100 translate-x-0'"
-    >
+    <section class="max-w-4xl mx-auto px-4 sm:px-6 pt-16 pb-20 sm:pt-24 sm:pb-24 text-center">
 
         <h1 class="text-4xl sm:text-6xl font-bold tracking-tight text-zinc-900 max-w-3xl mx-auto leading-[1.1]">
             Real Google-style coding interviews. Actionable feedback to pass.
@@ -15,12 +12,15 @@
 
         <p class="mt-6 text-base sm:text-lg text-zinc-600 max-w-2xl mx-auto leading-relaxed">
             Stop guessing why you aren't clearing technical rounds. Practice a realistic 1-hour Data Structures &amp; Algorithms interview, discuss your result live, and get a personalized study &amp; assignment plan.
+            Ready to test yourself under real interview conditions?
         </p>
 
+        <p class="mt-6 text-base sm:text-lg text-zinc-900 max-w-2xl mx-auto leading-relaxed font-bold">
+            Ready to test yourself under real interview conditions?
+        </p>
         <div class="mt-9 flex flex-col sm:flex-row items-center justify-center gap-3.5">
             <a
                 href="/book"
-                @click.prevent="leavingToBook = true; setTimeout(() => { window.location.href = '/book'; }, 240)"
                 class="w-full sm:w-auto px-7 py-3.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-white font-semibold text-sm shadow-sm transition-all duration-200 flex items-center justify-center gap-2 group"
             >
                 <span>Select a Day &amp; Book a Call</span>
@@ -40,8 +40,7 @@
     <!-- Visual Step-by-Step Journey (Replaces the 3 boxy tiles) -->
     <section
         id="process"
-        class="border-t border-zinc-100 bg-zinc-50/50 py-20 sm:py-24 transition-all duration-300 ease-in-out"
-        :class="leavingToBook ? 'opacity-0 -translate-x-10' : 'opacity-100 translate-x-0'"
+        class="border-t border-zinc-100 bg-zinc-50/50 py-20 sm:py-24"
     >
         <div class="max-w-4xl mx-auto px-4 sm:px-6">
             <div class="mb-16">
@@ -66,7 +65,7 @@
                         </span>
                         <h3 class="text-xl font-bold text-zinc-900">You schedule your appointment</h3>
                         <p class="text-sm text-zinc-600 leading-relaxed">
-                            Pick a day on the calendar and choose your preferred hour. Share your target company, current LeetCode progress, and preferred coding language. You immediately receive a calendar invitation (<code class="text-zinc-800 font-mono text-xs">.ics</code>) with your Google Meet link and standalone coding room URL.
+                            Pick a day on the calendar and choose your preferred hour. Share your target company, current LeetCode progress, and preferred coding language. You immediately receive a calendar invitation with your Google Meet link and standalone coding room URL.
                         </p>
                         <div class="pt-1 flex flex-wrap gap-2 text-xs text-zinc-500">
                             <span id="landing-workdays-pill" class="px-2.5 py-1 rounded-lg bg-white border border-zinc-200">Workdays: 17:00–22:00 CET</span>
@@ -200,7 +199,6 @@
                 </div>
                 <a
                     href="/book"
-                    @click.prevent="leavingToBook = true; setTimeout(() => { window.location.href = '/book'; }, 240)"
                     class="px-6 py-3 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-white text-xs sm:text-sm font-semibold transition flex items-center gap-2 shrink-0"
                 >
                     <span>Select a Day &amp; Book Now</span>
