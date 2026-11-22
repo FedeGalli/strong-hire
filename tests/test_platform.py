@@ -1,3 +1,5 @@
+import json
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,6 +11,8 @@ from fastapi.testclient import TestClient
 from app.config import settings
 from app.database import (
     cancel_or_reject_session,
+    create_interview_session,
+    create_slot,
     expire_stale_pending_bookings,
     get_bundle,
     get_db_connection,
@@ -30,6 +34,27 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     reset_rate_limits()
     init_db()
     with TestClient(app) as c:
+        c.get("/")
+        original_post = c.post
+
+        def csrf_post(url, *args, **kwargs):
+            if not url.startswith("/api/webhooks") and not url.startswith("/webhooks"):
+                token = c.cookies.get("swe_mock_csrf")
+                if not token:
+                    c.get("/")
+                    token = c.cookies.get("swe_mock_csrf")
+                data = kwargs.get("data")
+                if "json" in kwargs:
+                    headers = dict(kwargs.get("headers") or {})
+                    headers.setdefault("X-CSRF-Token", token)
+                    kwargs["headers"] = headers
+                elif data is None:
+                    kwargs["data"] = {"csrf_token": token}
+                elif isinstance(data, dict) and "csrf_token" not in data:
+                    kwargs["data"] = {**data, "csrf_token": token}
+            return original_post(url, *args, **kwargs)
+
+        c.post = csrf_post
         yield c
 
 
@@ -197,9 +222,13 @@ def test_end_to_end_booking_room_and_threaded_pdf(client: TestClient):
 
     # 3. Real-time WebSocket room sync (authenticated interviewer toggles syntax + candidate updates code)
     interviewer_secret = rescheduled_session["interviewer_secret"]
+    client.cookies.clear()
     with client.websocket_connect(
-        f"/ws/room/{session_id}?key={interviewer_secret}"
-    ) as ws_int, client.websocket_connect(f"/ws/room/{session_id}") as ws_cand:
+        f"/ws/room/{session_id}",
+        subprotocols=["stronghire.v1", interviewer_secret],
+    ) as ws_int, client.websocket_connect(
+        f"/ws/room/{session_id}", subprotocols=["stronghire.v1"]
+    ) as ws_cand:
         ws_int.send_json(
             {
                 "type": "config_update",
@@ -227,11 +256,73 @@ def test_end_to_end_booking_room_and_threaded_pdf(client: TestClient):
         code_msg = ws_int.receive_json()
         assert code_msg["type"] == "code_update"
 
+        # 3b. Real-time Remote Cursor sync & role/name stamping
+        ws_cand.send_json(
+            {
+                "type": "cursor_move",
+                "filename": "solution.txt",
+                "cursor": {"row": 1, "column": 4},
+            }
+        )
+        cursor_cand_msg = ws_int.receive_json()
+        assert cursor_cand_msg["type"] == "remote_cursor"
+        assert cursor_cand_msg["role"] == "candidate"
+        assert cursor_cand_msg["name"] == "Elena Bianchi"
+        assert cursor_cand_msg["filename"] == "solution.txt"
+        assert cursor_cand_msg["cursor"] == {"row": 1, "column": 4}
+
+        ws_int.send_json(
+            {
+                "type": "cursor_move",
+                "filename": "solution.txt",
+                "cursor": {"row": 0, "column": 0},
+            }
+        )
+        cursor_int_msg = ws_cand.receive_json()
+        assert cursor_int_msg["type"] == "remote_cursor"
+        assert cursor_int_msg["role"] == "interviewer"
+        assert cursor_int_msg["name"] == "Interviewer"
+        assert cursor_int_msg["cursor"] == {"row": 0, "column": 0}
+
+        # 3c. Real-time Remote Text Selection broadcast
+        ws_cand.send_json(
+            {
+                "type": "cursor_move",
+                "filename": "solution.txt",
+                "cursor": {"row": 1, "column": 10},
+                "selection": {
+                    "start": {"row": 1, "column": 4},
+                    "end": {"row": 1, "column": 10},
+                },
+            }
+        )
+        sel_msg = ws_int.receive_json()
+        assert sel_msg["type"] == "remote_cursor"
+        assert sel_msg["selection"] == {
+            "start": {"row": 1, "column": 4},
+            "end": {"row": 1, "column": 10},
+        }
+
+    # 3d. Interviewer room renders timer while candidate room does NOT
+    client.cookies.clear()
+    r_room_cand = client.get(f"/room/{session_id}")
+    assert r_room_cand.status_code == 200
+    assert "interviewer-timer" not in r_room_cand.text
+    assert "sidebar-timer-display" not in r_room_cand.text
+
+    r_room_int = client.get(f"/room/{session_id}?key={interviewer_secret}")
+    assert r_room_int.status_code == 200
+    assert "interviewer-timer" in r_room_int.text
+    assert "sidebar-timer-display" in r_room_int.text
+    assert "Interview Timer" in r_room_int.text
+
     # 4. Save Rubric & Final Verdict:
     #    Before breakdown is sent, unauthenticated candidate gets 404 on /feedback/{id},
     #    while authenticated interviewer can preview it.
+    client.post("/admin/login", data={"password": settings.ADMIN_PASSWORD})
     r_rubric = client.post(
-        f"/api/session/{session_id}/rubric?key={interviewer_secret}",
+        f"/api/session/{session_id}/rubric",
+        headers={"X-Interviewer-Key": interviewer_secret},
         json={
             "notes_clarification": "Clear questions on constraints.",
             "score_clarification": 5,
@@ -263,6 +354,33 @@ def test_end_to_end_booking_room_and_threaded_pdf(client: TestClient):
     assert completed_session["status"] == "COMPLETED"
     assert completed_session["final_verdict"] == "Strong Hire"
     assert completed_session["breakdown_sent_at"] is not None
+
+    # 4b. Once sent, the judgement is locked: editor is read-only and APIs reject edits
+    r_editor_locked = client.get(f"/admin/session/{session_id}")
+    assert r_editor_locked.status_code == 200
+    assert "Read-only" in r_editor_locked.text
+    assert "Locked after sending" in r_editor_locked.text
+    assert "Save Feedback Breakdown" not in r_editor_locked.text
+
+    r_save_locked = client.post(
+        f"/admin/session/{session_id}/save",
+        data={"final_verdict": "No Hire"},
+        follow_redirects=False,
+    )
+    assert r_save_locked.status_code == 409
+
+    r_rubric_locked = client.post(
+        f"/api/session/{session_id}/rubric",
+        headers={"X-Interviewer-Key": interviewer_secret},
+        json={"final_verdict": "No Hire"},
+    )
+    assert r_rubric_locked.status_code == 409
+
+    # Dashboard must clearly show that the judgement was sent
+    r_past = client.get("/admin?tab=past")
+    assert r_past.status_code == 200
+    assert "Judgement Sent" in r_past.text
+    assert "View Judgement (Read-only)" in r_past.text
 
     # 5. Once feedback is sent, the candidate is redirected from /room/{id} to /feedback/{id}
     #    and can view their published breakdown
@@ -428,8 +546,9 @@ def test_three_mock_bundle_and_youtube_discount(client: TestClient):
     r_checkout = client.get(f"/booking/{s1_id}/payment")
     assert r_checkout.status_code == 200
     assert "Recording, YouTube Publication &amp; Monetization Waiver Agreement" in r_checkout.text
+    assert f"SAVE {settings.BUNDLE3_DISCOUNT_PERCENT}%" in r_checkout.text
 
-    # 2. Complete checkout + signed Revolut webhook with 3-Mock Bundle + YouTube Discount (€152)
+    # 2. Complete checkout + signed Revolut webhook with 3-Mock Bundle + YouTube Discount (€142)
     _complete_revolut_payment_via_webhook(
         client, s1_id, package_type="bundle_3", youtube_consent="1"
     )
@@ -438,7 +557,7 @@ def test_three_mock_bundle_and_youtube_discount(client: TestClient):
     assert s1["status"] == "CONFIRMED"
     assert s1["package_type"] == "bundle_3"
     assert s1["youtube_consent"] is True
-    assert s1["price_eur"] == 152
+    assert s1["price_eur"] == 142
     assert s1["bundle_id"] != ""
     assert s1["bundle_credits_remaining"] == 2
     assert s1["bundle_code"].startswith("SH-")
@@ -653,7 +772,8 @@ def test_security_regressions_and_slot_integrity(client: TestClient):
 
     # --- 7. Feedback 404 before send, candidate WS config_update blocked, ADMIN_SECRET not in room HTML ---
     assert client.get(f"/feedback/{sid1}").status_code == 404
-    r_room_int = client.get(f"/room/{sid1}?key={get_session_with_slot(sid1)['interviewer_secret']}")
+    client.post("/admin/login", data={"password": settings.ADMIN_PASSWORD})
+    r_room_int = client.get(f"/room/{sid1}")
     assert r_room_int.status_code == 200
     assert settings.ADMIN_SECRET not in r_room_int.text
 
@@ -667,3 +787,354 @@ def test_security_regressions_and_slot_integrity(client: TestClient):
             }
         )
     assert get_session_with_slot(sid1)["syntax_highlighting_enabled"] is False
+
+
+def test_min_48_hours_booking_notice(client: TestClient):
+    now_utc = datetime.now(timezone.utc)
+
+    # 1. Slot 10 hours from now (< 48h)
+    near_start = (now_utc + timedelta(hours=10)).isoformat()
+    near_end = (now_utc + timedelta(hours=11)).isoformat()
+    near_slot_id = create_slot(near_start, near_end)
+
+    # 2. Slot 52 hours from now (> 48h)
+    far_start = (now_utc + timedelta(hours=52)).isoformat()
+    far_end = (now_utc + timedelta(hours=53)).isoformat()
+    far_slot_id = create_slot(far_start, far_end)
+
+    # Available slots list must never include near_slot_id (< 48h)
+    avail_ids = {s["id"] for s in list_available_slots()}
+    assert near_slot_id not in avail_ids
+    assert far_slot_id in avail_ids
+
+    # Window slots list must also exclude near_slot_id (< 48h)
+    window_ids = {s["id"] for s in list_window_slots()}
+    assert near_slot_id not in window_ids
+    assert far_slot_id in window_ids
+
+    # 3. Attempting to book the near slot (< 48h) via POST /book must be rejected
+    r_book_near = client.post(
+        "/book",
+        data={
+            "slot_id": str(near_slot_id),
+            "candidate_name": "Too Soon",
+            "candidate_email": "soon@example.com",
+            "target_company": "Google",
+            "target_role": "SWE",
+            "preferred_language": "python",
+            "package_type": "single",
+        },
+        follow_redirects=False,
+    )
+    assert r_book_near.status_code == 303
+    assert "error=" in r_book_near.headers["location"]
+    assert "48" in r_book_near.headers["location"]
+
+    # 4. Attempting to book via direct create_interview_session must raise ValueError
+    with pytest.raises(ValueError, match="at least 48 hours"):
+        create_interview_session(
+            slot_id=near_slot_id,
+            candidate_name="Too Soon",
+            candidate_email="soon@example.com",
+            leetcode_solved=50,
+            target_company="Google",
+            preferred_language="python",
+            target_role="SWE",
+            resume_path_or_url="",
+        )
+
+    # 5. Booking the far slot (> 48h) must succeed
+    r_book_far = client.post(
+        "/book",
+        data={
+            "slot_id": str(far_slot_id),
+            "candidate_name": "On Time",
+            "candidate_email": "ontime@example.com",
+            "target_company": "Google",
+            "target_role": "SWE",
+            "preferred_language": "python",
+            "package_type": "single",
+        },
+        follow_redirects=False,
+    )
+    assert r_book_far.status_code == 303
+    assert "/payment" in r_book_far.headers["location"]
+
+
+def test_csrf_rejects_form_post_with_invalid_token(client: TestClient):
+    r = client.post(
+        "/admin/login",
+        data={"password": settings.ADMIN_PASSWORD, "csrf_token": "not-the-real-token"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 403
+    assert "CSRF" in r.text
+
+    # Verify the HTML login form renders the csrf_token hidden field and logs in successfully
+    client.cookies.clear()
+    r_get = client.get("/admin")
+    assert r_get.status_code == 200
+    assert 'name="csrf_token"' in r_get.text
+    match = re.search(r'name="csrf_token"\s+value="([^"]+)"', r_get.text)
+    assert match is not None
+    real_csrf = match.group(1)
+
+    r_login_ok = client.post(
+        "/admin/login",
+        data={"password": settings.ADMIN_PASSWORD, "csrf_token": real_csrf},
+        follow_redirects=False,
+    )
+    assert r_login_ok.status_code == 303
+    assert r_login_ok.headers["location"] == "/admin"
+
+
+def test_interview_mode_selection_and_coming_soon(client: TestClient):
+    slots = list_available_slots()
+    slot_a = slots[0]["id"]
+    slot_b = slots[1]["id"]
+
+    # 1. Booking AI-assisted coding is rejected with coming soon message
+    r_ai = client.post(
+        "/book",
+        data={
+            "slot_id": str(slot_a),
+            "candidate_name": "AI Tester",
+            "candidate_email": "ai@example.com",
+            "leetcode_solved": "50",
+            "target_company": "Anthropic",
+            "target_role": "AI Engineer",
+            "preferred_language": "python",
+            "interview_mode": "ai_multifile",
+        },
+        follow_redirects=False,
+    )
+    assert r_ai.status_code == 303
+    assert "error=" in r_ai.headers["location"]
+    assert "coming+soon" in r_ai.headers["location"]
+
+    # 2. Booking a Behavioural interview succeeds and initializes STAR template
+    r_beh = client.post(
+        "/book",
+        data={
+            "slot_id": str(slot_a),
+            "candidate_name": "Sara Behavioral",
+            "candidate_email": "sara@example.com",
+            "leetcode_solved": "0",
+            "target_company": "Amazon",
+            "target_role": "Engineering Manager",
+            "preferred_language": "python",
+            "interview_mode": "behavioral",
+        },
+        follow_redirects=False,
+    )
+    assert r_beh.status_code == 303
+    session_id = r_beh.headers["location"].split("/booking/")[1].split("/payment")[0]
+
+    session = get_session_with_slot(session_id)
+    assert session["interview_mode"] == "behavioral"
+    workspace = session["workspace_files"]
+    if isinstance(workspace, str):
+        workspace = json.loads(workspace)
+    assert "STAR Method" in workspace["solution.txt"]["content"]
+
+    # 3. Booking form displays the interview types
+    r_form = client.get("/book")
+    assert r_form.status_code == 200
+    assert "Coding DSA" in r_form.text
+    assert "Coming Soon" in r_form.text
+    assert "Behavioural" in r_form.text
+
+    # 4. Bundle credit session can also be booked with behavioural mode
+    from app.database import create_interview_session, ensure_bundle_for_paid_session
+    s_bundle = create_interview_session(
+        slot_id=slot_b,
+        candidate_name="Bundle Mode Tester",
+        candidate_email="bmode@example.com",
+        leetcode_solved=0,
+        target_company="Meta",
+        preferred_language="python",
+        target_role="Engineering Manager",
+        resume_path_or_url="",
+        package_type="bundle_3",
+    )
+    b_info = ensure_bundle_for_paid_session(s_bundle["id"])
+    access_token = b_info["bundle_access_token"]
+
+    slots_remaining = list_available_slots()
+    slot_c = next(s["id"] for s in slots_remaining if s["id"] not in (slot_a, slot_b))
+
+    r_bundle_beh = client.post(
+        f"/bundle/b/{access_token}",
+        data={
+            "slot_id": str(slot_c),
+            "candidate_name": "Bundle Mode Tester",
+            "leetcode_solved": "0",
+            "target_company": "Meta",
+            "target_role": "Leadership",
+            "preferred_language": "python",
+            "interview_mode": "behavioral",
+        },
+        follow_redirects=False,
+    )
+    assert r_bundle_beh.status_code == 303
+    bundle_session_id = r_bundle_beh.headers["location"].split("/booking/")[1].split("/payment")[0]
+    b_session = get_session_with_slot(bundle_session_id)
+    assert b_session["interview_mode"] == "behavioral"
+
+    # 5. Admin panel displays interview type for the confirmed session
+    client.post("/admin/login", data={"password": settings.ADMIN_PASSWORD})
+    r_admin = client.get("/admin?tab=upcoming")
+    assert r_admin.status_code == 200
+    assert "Behavioural Interview" in r_admin.text
+
+    # Also breakdown editor shows interview type
+    r_bd = client.get(f"/admin/session/{bundle_session_id}")
+    assert r_bd.status_code == 200
+    assert "Behavioural" in r_bd.text
+
+
+def test_past_interviews_ordering_pending_judgment_first(client: TestClient):
+    from app.database import (
+        create_slot,
+        create_interview_session,
+        confirm_paid_session,
+        mark_session_completed,
+        list_sessions_by_category,
+        get_db_connection,
+    )
+    now_utc = datetime.now(timezone.utc)
+
+    # Create slots in the future (>48h) to satisfy booking guard, then backdate them to past
+    f1_start = (now_utc + timedelta(hours=60)).isoformat()
+    f1_end = (now_utc + timedelta(hours=61)).isoformat()
+    s1 = create_slot(f1_start, f1_end)
+
+    f2_start = (now_utc + timedelta(hours=62)).isoformat()
+    f2_end = (now_utc + timedelta(hours=63)).isoformat()
+    s2 = create_slot(f2_start, f2_end)
+
+    f3_start = (now_utc + timedelta(hours=64)).isoformat()
+    f3_end = (now_utc + timedelta(hours=65)).isoformat()
+    s3 = create_slot(f3_start, f3_end)
+
+    f4_start = (now_utc + timedelta(hours=66)).isoformat()
+    f4_end = (now_utc + timedelta(hours=67)).isoformat()
+    s4 = create_slot(f4_start, f4_end)
+
+    sess1 = create_interview_session(slot_id=s1, candidate_name="Past One", candidate_email="one@example.com", leetcode_solved=50, resume_path_or_url="", target_company="Co1", target_role="SWE", preferred_language="python", package_type="single")
+    confirm_paid_session(sess1["id"])
+    mark_session_completed(sess1["id"], breakdown_sent=True)  # judgment sent
+
+    sess2 = create_interview_session(slot_id=s2, candidate_name="Past Two", candidate_email="two@example.com", leetcode_solved=50, resume_path_or_url="", target_company="Co2", target_role="SWE", preferred_language="python", package_type="single")
+    confirm_paid_session(sess2["id"])  # pending judgment
+
+    sess3 = create_interview_session(slot_id=s3, candidate_name="Past Three", candidate_email="three@example.com", leetcode_solved=50, resume_path_or_url="", target_company="Co3", target_role="SWE", preferred_language="python", package_type="single")
+    confirm_paid_session(sess3["id"])
+    mark_session_completed(sess3["id"], breakdown_sent=True)  # judgment sent
+
+    sess4 = create_interview_session(slot_id=s4, candidate_name="Past Four", candidate_email="four@example.com", leetcode_solved=50, resume_path_or_url="", target_company="Co4", target_role="SWE", preferred_language="python", package_type="single")
+    confirm_paid_session(sess4["id"])  # pending judgment
+
+    # Backdate slot start/end to be past times so list_sessions_by_category treats them as past
+    t1_start = (now_utc - timedelta(days=5)).isoformat()
+    t1_end = (now_utc - timedelta(days=5, hours=-1)).isoformat()
+    t2_start = (now_utc - timedelta(days=4)).isoformat()
+    t2_end = (now_utc - timedelta(days=4, hours=-1)).isoformat()
+    t3_start = (now_utc - timedelta(days=3)).isoformat()
+    t3_end = (now_utc - timedelta(days=3, hours=-1)).isoformat()
+    t4_start = (now_utc - timedelta(days=2)).isoformat()
+    t4_end = (now_utc - timedelta(days=2, hours=-1)).isoformat()
+
+    # Update slot start/end to be past times so list_sessions_by_category treats them as past
+    conn = get_db_connection()
+    conn.execute("UPDATE availability_slots SET start_time = ?, end_time = ? WHERE id = ?", (t1_start, t1_end, s1))
+    conn.execute("UPDATE availability_slots SET start_time = ?, end_time = ? WHERE id = ?", (t2_start, t2_end, s2))
+    conn.execute("UPDATE availability_slots SET start_time = ?, end_time = ? WHERE id = ?", (t3_start, t3_end, s3))
+    conn.execute("UPDATE availability_slots SET start_time = ?, end_time = ? WHERE id = ?", (t4_start, t4_end, s4))
+    conn.commit()
+    conn.close()
+
+    cat = list_sessions_by_category()
+    past_sessions = [p for p in cat["past"] if p["id"] in (sess1["id"], sess2["id"], sess3["id"], sess4["id"])]
+    assert len(past_sessions) == 4
+
+    # Order must be:
+    # 1. Past Four (2 days ago, pending judgment)
+    # 2. Past Two (4 days ago, pending judgment)
+    # 3. Past Three (3 days ago, judgment sent)
+    # 4. Past One (5 days ago, judgment sent)
+    assert past_sessions[0]["id"] == sess4["id"]
+    assert past_sessions[1]["id"] == sess2["id"]
+    assert past_sessions[2]["id"] == sess3["id"]
+    assert past_sessions[3]["id"] == sess1["id"]
+
+    # Verify rendered order in Admin HTML
+    client.post("/admin/login", data={"password": settings.ADMIN_PASSWORD})
+    r_admin_past = client.get("/admin?tab=past")
+    assert r_admin_past.status_code == 200
+    pos4 = r_admin_past.text.find("Past Four")
+    pos2 = r_admin_past.text.find("Past Two")
+    pos3 = r_admin_past.text.find("Past Three")
+    pos1 = r_admin_past.text.find("Past One")
+    assert -1 < pos4 < pos2 < pos3 < pos1
+
+
+def test_security_and_bug_fixes(client: TestClient):
+    # 1. JSON POST without X-CSRF-Token is rejected with 403
+    client.post("/admin/login", data={"password": settings.ADMIN_PASSWORD})
+    r_no_csrf = client.post(
+        "/api/admin/availability/toggle-hour",
+        json={"date": "2026-11-22", "hour": 12},
+        headers={"X-CSRF-Token": "invalid-token"},
+    )
+    assert r_no_csrf.status_code == 403
+
+    # 2. Oversized form body is rejected with 413
+    r_big = client.post(
+        "/admin/login",
+        content=b"password=" + b"a" * 1_100_000,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert r_big.status_code == 413
+
+    # 3. Candidate name with apostrophe is safely placed in data-confirm, not raw JS string
+    slot_id = list_available_slots()[0]["id"]
+    sess = create_interview_session(
+        slot_id=slot_id,
+        candidate_name="Alex O'Connor",
+        candidate_email="oconnor@example.com",
+        leetcode_solved=50,
+        target_company="Stripe",
+        preferred_language="python",
+        target_role="Mid-Level (L4)",
+        resume_path_or_url="",
+        package_type="bundle_3",
+    )
+    # Pending session cannot connect to WebSocket room
+    with pytest.raises(Exception):
+        with client.websocket_connect(f"/ws/room/{sess['id']}"):
+            pass
+
+    _complete_revolut_payment_via_webhook(client, sess["id"], package_type="bundle_3")
+    confirmed_sess = get_session_with_slot(sess["id"])
+
+    r_admin = client.get("/admin")
+    assert r_admin.status_code == 200
+    assert 'onsubmit="return confirm(this.dataset.confirm);"' in r_admin.text
+    assert "Alex O&#39;Connor?" in r_admin.text
+
+    # 4. Malformed cursor_move does not crash WebSocket
+    with client.websocket_connect(f"/ws/room/{sess['id']}") as ws_a, client.websocket_connect(
+        f"/ws/room/{sess['id']}"
+    ) as ws_b:
+        ws_a.send_json({"type": "cursor_move", "filename": "solution.txt", "cursor": {"row": "bad", "column": None}})
+        msg = ws_b.receive_json()
+        assert msg["type"] == "remote_cursor"
+        assert msg["cursor"] == {"row": 0, "column": 0}
+
+    # 5. Feedback page links to /bundle/b/{bundle_access_token} (not disabled /bundle/{bundle_id})
+    client.post(f"/admin/session/{sess['id']}/send-breakdown")
+    r_fb = client.get(f"/feedback/{sess['id']}")
+    assert r_fb.status_code == 200
+    assert f"/bundle/b/{confirmed_sess['bundle_access_token']}" in r_fb.text
+    assert f"/bundle/{confirmed_sess['bundle_id']}" not in r_fb.text

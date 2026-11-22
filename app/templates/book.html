@@ -71,6 +71,7 @@
             ></button>
         </div>
         <form x-show="showLookup" x-cloak action="/book/lookup-bundle" method="POST" class="mt-3 pt-3 border-t border-zinc-200 flex flex-col sm:flex-row gap-2">
+            <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}" />
             <input
                 type="email"
                 name="query_str"
@@ -116,9 +117,11 @@
             <div class="lg:col-span-4 p-6 sm:p-7 border-b lg:border-b-0 lg:border-r border-zinc-200 bg-zinc-50/50 flex flex-col justify-between space-y-6">
                 <div class="space-y-4">
                     <div class="flex items-center gap-3">
-                        <div class="w-9 h-9 rounded-lg bg-zinc-900 text-white font-mono font-bold text-xs flex items-center justify-center">
-                            &lt;/&gt;
-                        </div>
+                        <img
+                            src="/static/stronghire-logo.svg"
+                            alt="{{ settings.APP_TITLE }} logo"
+                            class="w-9 h-9 rounded-lg object-cover shadow-sm"
+                        />
                         <div>
                             <p class="text-xs text-zinc-500 font-medium">{{ settings.APP_TITLE }}</p>
                             <h2 class="text-base font-bold text-zinc-900">1-on-1 SWE Mock Interview</h2>
@@ -155,6 +158,13 @@
                         <div x-text="'• Mon–Fri: ' + localWorkdayHoursLabel"></div>
                         <div x-text="'• Sat–Sun: ' + localWeekendHoursLabel"></div>
                     </div>
+
+                    <div class="flex items-center gap-2 p-2.5 rounded-xl bg-zinc-50 border border-zinc-200 text-[11px] text-zinc-600">
+                        <svg class="w-4 h-4 text-zinc-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                        <span>Bookings require at least <strong>48 hours notice</strong>.</span>
+                    </div>
                 </div>
 
                 <div class="pt-4 border-t border-zinc-200/80 space-y-1.5">
@@ -178,7 +188,7 @@
                         </div>
                     </div>
                     <p class="text-[11px] text-zinc-500 leading-snug">
-                        With optional 20% YouTube discount (&euro;{{ settings.PRICE_SINGLE_STANDARD_EUR }} standard). 3-Mock Bundle also available.
+                        With optional {{ settings.YOUTUBE_DISCOUNT_PERCENT }}% YouTube discount (&euro;{{ settings.PRICE_SINGLE_STANDARD_EUR }} standard). 3-Mock Bundle also available.
                     </p>
                     {% endif %}
                 </div>
@@ -324,6 +334,7 @@
         >
             {% if reschedule_session %}
             <form action="/reschedule/{{ reschedule_session.id }}" method="POST" class="rounded-2xl bg-white border border-zinc-200 p-6 sm:p-8 shadow-sm space-y-6">
+                <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}" />
                 <input type="hidden" name="slot_id" :value="selectedSlot ? selectedSlot.id : ''" />
 
                 <!-- Selected Day & Hour Summary Banner -->
@@ -369,6 +380,7 @@
             </form>
             {% elif bundle_session %}
             <form action="/bundle/b/{{ bundle_access_token or bundle_session.access_token }}" method="POST" class="rounded-2xl bg-white border border-zinc-200 p-6 sm:p-8 shadow-sm space-y-6">
+                <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}" />
                 <input type="hidden" name="slot_id" :value="selectedSlot ? selectedSlot.id : ''" />
 
                 <!-- Selected Day & Hour Summary Banner -->
@@ -396,6 +408,113 @@
                     </p>
                 </div>
 
+                <!-- Interview Type Selection for Bundle Session -->
+                <div class="space-y-2">
+                    <label class="block text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                        Interview Type *
+                    </label>
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <!-- Option 1: Coding DSA -->
+                        <label
+                            @click="selectedInterviewMode = 'classic_dsa'"
+                            class="relative flex flex-col p-4 rounded-xl border cursor-pointer transition-all duration-150"
+                            :class="selectedInterviewMode === 'classic_dsa'
+                                ? 'border-zinc-900 bg-zinc-900 text-white shadow-sm ring-1 ring-zinc-900'
+                                : 'border-zinc-200 bg-white hover:border-zinc-300 text-zinc-800'"
+                        >
+                            <input
+                                type="radio"
+                                name="interview_mode"
+                                value="classic_dsa"
+                                x-model="selectedInterviewMode"
+                                class="sr-only"
+                            />
+                            <div class="flex items-center justify-between mb-2">
+                                <span
+                                    class="w-7 h-7 rounded-lg flex items-center justify-center font-mono font-bold text-xs"
+                                    :class="selectedInterviewMode === 'classic_dsa' ? 'bg-white/10 text-white' : 'bg-zinc-100 text-zinc-700'"
+                                >
+                                    &lt;/&gt;
+                                </span>
+                                <span
+                                    class="w-4 h-4 rounded-full border flex items-center justify-center"
+                                    :class="selectedInterviewMode === 'classic_dsa' ? 'border-white bg-white text-zinc-900' : 'border-zinc-300'"
+                                >
+                                    <span x-show="selectedInterviewMode === 'classic_dsa'" class="w-2 h-2 rounded-full bg-zinc-900"></span>
+                                </span>
+                            </div>
+                            <span class="font-bold text-sm">Coding DSA</span>
+                            <span
+                                class="text-[11px] mt-1 leading-relaxed"
+                                :class="selectedInterviewMode === 'classic_dsa' ? 'text-zinc-300' : 'text-zinc-500'"
+                            >
+                                Realistic 45m DSA coding problem + 15m live debrief &amp; actionable feedback.
+                            </span>
+                        </label>
+
+                        <!-- Option 2: AI-Assisted Coding (Coming Soon) -->
+                        <div
+                            class="relative flex flex-col p-4 rounded-xl border border-dashed border-zinc-200 bg-zinc-50/70 text-zinc-400 select-none cursor-not-allowed"
+                            title="AI-Assisted Coding interviews are coming soon"
+                        >
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="w-7 h-7 rounded-lg flex items-center justify-center bg-zinc-100 text-zinc-400 text-xs">
+                                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                                    </svg>
+                                </span>
+                                <span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-amber-50 text-amber-700 border border-amber-200">
+                                    Coming Soon
+                                </span>
+                            </div>
+                            <span class="font-bold text-sm text-zinc-600">AI-Assisted Coding</span>
+                            <span class="text-[11px] mt-1 leading-relaxed text-zinc-400">
+                                Multi-file repository challenges pairing with modern AI tools &amp; prompt evaluation.
+                            </span>
+                        </div>
+
+                        <!-- Option 3: Behavioural Interview -->
+                        <label
+                            @click="selectedInterviewMode = 'behavioral'"
+                            class="relative flex flex-col p-4 rounded-xl border cursor-pointer transition-all duration-150"
+                            :class="selectedInterviewMode === 'behavioral'
+                                ? 'border-zinc-900 bg-zinc-900 text-white shadow-sm ring-1 ring-zinc-900'
+                                : 'border-zinc-200 bg-white hover:border-zinc-300 text-zinc-800'"
+                        >
+                            <input
+                                type="radio"
+                                name="interview_mode"
+                                value="behavioral"
+                                x-model="selectedInterviewMode"
+                                class="sr-only"
+                            />
+                            <div class="flex items-center justify-between mb-2">
+                                <span
+                                    class="w-7 h-7 rounded-lg flex items-center justify-center text-xs"
+                                    :class="selectedInterviewMode === 'behavioral' ? 'bg-white/10 text-white' : 'bg-zinc-100 text-zinc-700'"
+                                >
+                                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                                    </svg>
+                                </span>
+                                <span
+                                    class="w-4 h-4 rounded-full border flex items-center justify-center"
+                                    :class="selectedInterviewMode === 'behavioral' ? 'border-white bg-white text-zinc-900' : 'border-zinc-300'"
+                                >
+                                    <span x-show="selectedInterviewMode === 'behavioral'" class="w-2 h-2 rounded-full bg-zinc-900"></span>
+                                </span>
+                            </div>
+                            <span class="font-bold text-sm">Behavioural</span>
+                            <span
+                                class="text-[11px] mt-1 leading-relaxed"
+                                :class="selectedInterviewMode === 'behavioral' ? 'text-zinc-300' : 'text-zinc-500'"
+                            >
+                                STAR method deep dive on leadership, conflict resolution, project execution &amp; culture fit.
+                            </span>
+                        </label>
+                    </div>
+                </div>
+
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                         <label class="block text-xs font-medium text-zinc-700 mb-1.5">Full Name *</label>
@@ -408,7 +527,9 @@
                         />
                     </div>
                     <div>
-                        <label class="block text-xs font-medium text-zinc-700 mb-1.5">LeetCode Problems Solved *</label>
+                        <label class="block text-xs font-medium text-zinc-700 mb-1.5">
+                            <span x-text="selectedInterviewMode === 'behavioral' ? 'LeetCode Problems Solved (Optional)' : 'LeetCode Problems Solved *'"></span>
+                        </label>
                         <input
                             type="number"
                             name="leetcode_solved"
@@ -447,7 +568,9 @@
                 </div>
 
                 <div>
-                    <label class="block text-xs font-medium text-zinc-700 mb-1.5">Preferred Coding Language *</label>
+                    <label class="block text-xs font-medium text-zinc-700 mb-1.5">
+                        <span x-text="selectedInterviewMode === 'behavioral' ? 'Primary Tech Background / Language *' : 'Preferred Coding Language *'"></span>
+                    </label>
                     <select
                         name="preferred_language"
                         required
@@ -478,6 +601,7 @@
             </form>
             {% else %}
             <form action="/book" method="POST" class="rounded-2xl bg-white border border-zinc-200 p-6 sm:p-8 shadow-sm space-y-6">
+                <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}" />
                 <input type="hidden" name="slot_id" :value="selectedSlot ? selectedSlot.id : ''" />
                 <input type="hidden" name="package_type" :value="selectedPackage" />
                 <!-- Anti-bot honeypot field -->
@@ -510,6 +634,113 @@
                     </p>
                 </div>
 
+                <!-- Interview Type Selection -->
+                <div class="space-y-2">
+                    <label class="block text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                        Interview Type *
+                    </label>
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <!-- Option 1: Coding DSA -->
+                        <label
+                            @click="selectedInterviewMode = 'classic_dsa'"
+                            class="relative flex flex-col p-4 rounded-xl border cursor-pointer transition-all duration-150"
+                            :class="selectedInterviewMode === 'classic_dsa'
+                                ? 'border-zinc-900 bg-zinc-900 text-white shadow-sm ring-1 ring-zinc-900'
+                                : 'border-zinc-200 bg-white hover:border-zinc-300 text-zinc-800'"
+                        >
+                            <input
+                                type="radio"
+                                name="interview_mode"
+                                value="classic_dsa"
+                                x-model="selectedInterviewMode"
+                                class="sr-only"
+                            />
+                            <div class="flex items-center justify-between mb-2">
+                                <span
+                                    class="w-7 h-7 rounded-lg flex items-center justify-center font-mono font-bold text-xs"
+                                    :class="selectedInterviewMode === 'classic_dsa' ? 'bg-white/10 text-white' : 'bg-zinc-100 text-zinc-700'"
+                                >
+                                    &lt;/&gt;
+                                </span>
+                                <span
+                                    class="w-4 h-4 rounded-full border flex items-center justify-center"
+                                    :class="selectedInterviewMode === 'classic_dsa' ? 'border-white bg-white text-zinc-900' : 'border-zinc-300'"
+                                >
+                                    <span x-show="selectedInterviewMode === 'classic_dsa'" class="w-2 h-2 rounded-full bg-zinc-900"></span>
+                                </span>
+                            </div>
+                            <span class="font-bold text-sm">Coding DSA</span>
+                            <span
+                                class="text-[11px] mt-1 leading-relaxed"
+                                :class="selectedInterviewMode === 'classic_dsa' ? 'text-zinc-300' : 'text-zinc-500'"
+                            >
+                                Realistic 45m DSA coding problem + 15m live debrief &amp; actionable feedback.
+                            </span>
+                        </label>
+
+                        <!-- Option 2: AI-Assisted Coding (Coming Soon) -->
+                        <div
+                            class="relative flex flex-col p-4 rounded-xl border border-dashed border-zinc-200 bg-zinc-50/70 text-zinc-400 select-none cursor-not-allowed"
+                            title="AI-Assisted Coding interviews are coming soon"
+                        >
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="w-7 h-7 rounded-lg flex items-center justify-center bg-zinc-100 text-zinc-400 text-xs">
+                                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                                    </svg>
+                                </span>
+                                <span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-amber-50 text-amber-700 border border-amber-200">
+                                    Coming Soon
+                                </span>
+                            </div>
+                            <span class="font-bold text-sm text-zinc-600">AI-Assisted Coding</span>
+                            <span class="text-[11px] mt-1 leading-relaxed text-zinc-400">
+                                Multi-file repository challenges pairing with modern AI tools &amp; prompt evaluation.
+                            </span>
+                        </div>
+
+                        <!-- Option 3: Behavioural Interview -->
+                        <label
+                            @click="selectedInterviewMode = 'behavioral'"
+                            class="relative flex flex-col p-4 rounded-xl border cursor-pointer transition-all duration-150"
+                            :class="selectedInterviewMode === 'behavioral'
+                                ? 'border-zinc-900 bg-zinc-900 text-white shadow-sm ring-1 ring-zinc-900'
+                                : 'border-zinc-200 bg-white hover:border-zinc-300 text-zinc-800'"
+                        >
+                            <input
+                                type="radio"
+                                name="interview_mode"
+                                value="behavioral"
+                                x-model="selectedInterviewMode"
+                                class="sr-only"
+                            />
+                            <div class="flex items-center justify-between mb-2">
+                                <span
+                                    class="w-7 h-7 rounded-lg flex items-center justify-center text-xs"
+                                    :class="selectedInterviewMode === 'behavioral' ? 'bg-white/10 text-white' : 'bg-zinc-100 text-zinc-700'"
+                                >
+                                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                                    </svg>
+                                </span>
+                                <span
+                                    class="w-4 h-4 rounded-full border flex items-center justify-center"
+                                    :class="selectedInterviewMode === 'behavioral' ? 'border-white bg-white text-zinc-900' : 'border-zinc-300'"
+                                >
+                                    <span x-show="selectedInterviewMode === 'behavioral'" class="w-2 h-2 rounded-full bg-zinc-900"></span>
+                                </span>
+                            </div>
+                            <span class="font-bold text-sm">Behavioural</span>
+                            <span
+                                class="text-[11px] mt-1 leading-relaxed"
+                                :class="selectedInterviewMode === 'behavioral' ? 'text-zinc-300' : 'text-zinc-500'"
+                            >
+                                STAR method deep dive on leadership, conflict resolution, project execution &amp; culture fit.
+                            </span>
+                        </label>
+                    </div>
+                </div>
+
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                         <label class="block text-xs font-medium text-zinc-700 mb-1.5">Full Name *</label>
@@ -535,7 +766,9 @@
 
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
-                        <label class="block text-xs font-medium text-zinc-700 mb-1.5">LeetCode Problems Solved *</label>
+                        <label class="block text-xs font-medium text-zinc-700 mb-1.5">
+                            <span x-text="selectedInterviewMode === 'behavioral' ? 'LeetCode Problems Solved (Optional)' : 'LeetCode Problems Solved *'"></span>
+                        </label>
                         <input
                             type="number"
                             name="leetcode_solved"
@@ -572,7 +805,9 @@
                         </select>
                     </div>
                     <div>
-                        <label class="block text-xs font-medium text-zinc-700 mb-1.5">Preferred Coding Language *</label>
+                        <label class="block text-xs font-medium text-zinc-700 mb-1.5">
+                            <span x-text="selectedInterviewMode === 'behavioral' ? 'Primary Tech Background / Language *' : 'Preferred Coding Language *'"></span>
+                        </label>
                         <select
                             name="preferred_language"
                             required
@@ -653,11 +888,20 @@ function calendarBooking() {
         return ranges.join(' & ');
     }
 
+    const collectHours = (keys, fallback) => {
+        const hasAnyKey = keys.some((k) => Object.prototype.hasOwnProperty.call(weeklySchedule, k));
+        if (!hasAnyKey) return fallback;
+        const merged = [];
+        keys.forEach((k) => {
+            (weeklySchedule[k] || []).forEach((h) => merged.push(h));
+        });
+        return merged;
+    };
     const localWorkdayHoursLabel = formatRomeHoursToLocalRanges(
-        weeklySchedule['0'] || [17, 18, 19, 20, 21]
+        collectHours(['0', '1', '2', '3', '4'], [17, 18, 19, 20, 21])
     );
     const localWeekendHoursLabel = formatRomeHoursToLocalRanges(
-        weeklySchedule['5'] || [9, 10, 11, 14, 15, 16, 17]
+        collectHours(['5', '6'], [9, 10, 11, 14, 15, 16, 17])
     );
 
     // Track total slots (free + booked) per local YYYY-MM-DD date key
@@ -701,7 +945,7 @@ function calendarBooking() {
         step: 'calendar',
         panelAnimState: 'idle', // 'idle' | 'leaving-left' | 'entering-right' | 'leaving-right' | 'entering-left'
         selectedPackage: '{{ initial_package or 'single' }}',
-        resumeMode: 'file',
+        selectedInterviewMode: 'classic_dsa',
         userTimezone,
         localWorkdayHoursLabel,
         localWeekendHoursLabel,

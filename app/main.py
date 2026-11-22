@@ -1,13 +1,14 @@
-import hashlib
+import asyncio
 import hmac
+import ipaddress
 import json
 import logging
 import re
+import secrets
 import time
 import urllib.parse
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import (
@@ -15,6 +16,7 @@ from fastapi import (
     Body,
     FastAPI,
     Form,
+    Header,
     HTTPException,
     Query,
     Request,
@@ -25,8 +27,9 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.datastructures import MutableHeaders
 
-from app.config import BASE_DIR, settings
+from app.config import BASE_DIR, settings, validate_security_settings
 from app.database import (
     MAX_BOOKING_DAYS_AHEAD,
     ROME_TZ,
@@ -34,27 +37,26 @@ from app.database import (
     book_bundle_credit_session,
     cancel_or_reject_session,
     confirm_paid_session,
+    create_admin_session,
     create_interview_session,
-    create_slot,
-    delete_slot,
     find_active_bundles_by_email,
-    get_bundle,
     get_bundle_by_token,
     get_session_by_revolut_order_id,
     get_session_with_slot,
     get_weekly_schedule,
     init_db,
-    list_all_slots,
+    is_valid_admin_session,
     list_available_slots,
     list_sessions_by_category,
     list_slots_by_rome_date,
     list_window_slots,
     mark_session_completed,
     mark_session_reschedule_requested,
+    prune_expired_admin_sessions,
     reschedule_interview_session,
+    revoke_admin_session,
     rotate_bundle_token,
     save_weekly_schedule_and_sync,
-    seed_rome_availability_schedule,
     set_date_hours_rome,
     toggle_date_hour_rome,
     update_rubric_notes,
@@ -88,22 +90,155 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+class RoomConnectionManager:
+    """
+    Manages active WebSocket connections for live interview rooms and decouples
+    instant in-memory broadcasts from periodic SQLite writes (every 30 seconds)
+    to ensure typing is silky smooth without disk I/O blocking.
+    """
+
+    def __init__(self) -> None:
+        self.active_rooms: Dict[str, List[WebSocket]] = {}
+        self.pending_saves: Dict[str, Dict[str, Any]] = {}
+        self.save_tasks: Dict[str, asyncio.Task] = {}
+
+    async def connect(
+        self, session_id: str, websocket: WebSocket, subprotocol: Optional[str] = None
+    ) -> None:
+        await websocket.accept(subprotocol=subprotocol)
+        self.active_rooms.setdefault(session_id, []).append(websocket)
+
+    def disconnect(self, session_id: str, websocket: WebSocket) -> None:
+        conns = self.active_rooms.get(session_id, [])
+        if websocket in conns:
+            conns.remove(websocket)
+        if not conns and session_id in self.active_rooms:
+            del self.active_rooms[session_id]
+
+    async def broadcast(
+        self, session_id: str, message: Dict[str, Any], sender: Optional[WebSocket] = None
+    ) -> None:
+        conns = list(self.active_rooms.get(session_id, []))
+        for conn in conns:
+            if sender is not None and conn is sender:
+                continue
+            try:
+                await conn.send_json(message)
+            except Exception:
+                self.disconnect(session_id, conn)
+
+    def queue_workspace_save(
+        self,
+        session_id: str,
+        workspace_files: Dict[str, Any],
+        active_filename: str,
+        syntax_enabled: bool,
+        editor_lang: str,
+        interview_mode: str,
+        delay_seconds: float = 30.0,
+    ) -> None:
+        """
+        Stores latest workspace files in memory and schedules a background DB write
+        after delay_seconds (30s) if no task is already ticking.
+        """
+        self.pending_saves[session_id] = {
+            "workspace_files": workspace_files,
+            "active_filename": active_filename,
+            "syntax_enabled": syntax_enabled,
+            "editor_lang": editor_lang,
+            "interview_mode": interview_mode,
+        }
+
+        if session_id in self.save_tasks and not self.save_tasks[session_id].done():
+            return
+
+        async def _delayed_save():
+            try:
+                await asyncio.sleep(delay_seconds)
+                await self.flush_workspace_save(session_id)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                self.save_tasks.pop(session_id, None)
+
+        task = asyncio.create_task(_delayed_save())
+        self.save_tasks[session_id] = task
+
+    async def flush_workspace_save(self, session_id: str) -> None:
+        """Immediately flushes pending in-memory workspace edits to SQLite."""
+        task = self.save_tasks.pop(session_id, None)
+        if task and not task.done():
+            task.cancel()
+
+        state = self.pending_saves.pop(session_id, None)
+        if not state:
+            return
+
+        try:
+            await run_in_threadpool(
+                update_workspace_state,
+                session_id,
+                state["workspace_files"],
+                state["active_filename"],
+                state["syntax_enabled"],
+                state["editor_lang"],
+                state["interview_mode"],
+            )
+        except Exception as exc:
+            logger.error("Failed to flush workspace save for session %s: %s", session_id, exc)
+
+    def flush_workspace_save_sync(self, session_id: str) -> None:
+        """Synchronously flushes pending workspace state to SQLite."""
+        task = self.save_tasks.pop(session_id, None)
+        if task and not task.done():
+            task.cancel()
+
+        state = self.pending_saves.pop(session_id, None)
+        if not state:
+            return
+
+        try:
+            update_workspace_state(
+                session_id,
+                state["workspace_files"],
+                state["active_filename"],
+                state["syntax_enabled"],
+                state["editor_lang"],
+                state["interview_mode"],
+            )
+        except Exception as exc:
+            logger.error("Failed to sync flush workspace save for session %s: %s", session_id, exc)
+
+    def flush_all_sync(self) -> None:
+        for sid in list(self.pending_saves.keys()):
+            self.flush_workspace_save_sync(sid)
+
+
+room_manager = RoomConnectionManager()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    validate_security_settings()
     init_db()
+    prune_expired_admin_sessions()
     yield
+    room_manager.flush_all_sync()
 
 
 app = FastAPI(title=settings.APP_TITLE, lifespan=lifespan)
 
 app.mount(
-    "/uploads/resumes",
-    StaticFiles(directory=str(settings.UPLOADS_DIR)),
-    name="resumes",
+    "/static",
+    StaticFiles(directory=str(BASE_DIR / "app" / "static")),
+    name="static",
 )
 
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
 ADMIN_COOKIE_NAME = "swe_mock_admin_token"
+CSRF_COOKIE_NAME = "swe_mock_csrf"
+CSRF_EXEMPT_PATHS = {"/webhooks/revolut"}
+SAFE_HTTP_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 EMAIL_RE = re.compile(r"^[^@\s\r\n]+@[^@\s\r\n]+\.[^@\s\r\n]{2,}$")
 SAFE_FILENAME_RE = re.compile(r"^[\w.\-]{1,64}$")
@@ -111,17 +246,35 @@ ALLOWED_LANGUAGE_KEYS = {k for k, _ in SUPPORTED_LANGUAGES}
 MAX_WORKSPACE_FILES = 20
 MAX_WORKSPACE_BYTES = 200_000
 MAX_AI_PROMPT_CHARS = 2_000
+MAX_FORM_BODY_BYTES = 1_048_576
+MAX_WS_MESSAGE_BYTES = MAX_WORKSPACE_BYTES + 16_384
 
 # Simple in-memory sliding-window rate limiter keyed by (bucket, key)
 _RATE_BUCKETS: Dict[Tuple[str, str], List[float]] = {}
+_RATE_LAST_PRUNE = 0.0
+_RATE_PRUNE_INTERVAL = 60.0
+_RATE_MAX_IDLE_SECONDS = 3600.0
 
 
 def reset_rate_limits() -> None:
+    global _RATE_LAST_PRUNE
     _RATE_BUCKETS.clear()
+    _RATE_LAST_PRUNE = 0.0
+
+
+def _prune_rate_buckets(now: float) -> None:
+    global _RATE_LAST_PRUNE
+    if now - _RATE_LAST_PRUNE < _RATE_PRUNE_INTERVAL and len(_RATE_BUCKETS) < 20_000:
+        return
+    _RATE_LAST_PRUNE = now
+    for key, hits in list(_RATE_BUCKETS.items()):
+        if not hits or now - hits[-1] > _RATE_MAX_IDLE_SECONDS:
+            _RATE_BUCKETS.pop(key, None)
 
 
 def _check_rate_limit(bucket: str, key: str, max_hits: int, window_seconds: int) -> bool:
     now = time.time()
+    _prune_rate_buckets(now)
     k = (bucket, key or "anon")
     hits = [t for t in _RATE_BUCKETS.get(k, []) if now - t < window_seconds]
     if len(hits) >= max_hits:
@@ -132,17 +285,170 @@ def _check_rate_limit(bucket: str, key: str, max_hits: int, window_seconds: int)
     return True
 
 
+def _parse_trusted_proxies(raw: str) -> List[Any]:
+    networks: List[Any] = []
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            logger.warning("Ignoring invalid TRUSTED_PROXIES entry: %s", part)
+    return networks
+
+
+_TRUSTED_PROXY_NETWORKS = _parse_trusted_proxies(settings.TRUSTED_PROXIES)
+
+
+def _ip_in_networks(ip: str, networks: List[Any]) -> bool:
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(address in network for network in networks)
+
+
 def _get_client_ip(request: Request) -> str:
     """
     Returns the client IP address.
-    Ignores spoofable `X-Forwarded-For` headers unless `settings.TRUST_PROXY_HEADERS`
-    is explicitly enabled behind a trusted reverse proxy.
+
+    `X-Forwarded-For` is only trusted when TRUST_PROXY_HEADERS is enabled *and*
+    the direct peer is listed in TRUSTED_PROXIES. The header is then walked from
+    right to left, skipping trusted hops, so clients cannot spoof their IP by
+    prepending a value.
     """
-    if settings.TRUST_PROXY_HEADERS:
-        forwarded = request.headers.get("x-forwarded-for", "")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else ""
+    peer = request.client.host if request.client else ""
+    if not settings.TRUST_PROXY_HEADERS or not _TRUSTED_PROXY_NETWORKS:
+        return peer
+    if not _ip_in_networks(peer, _TRUSTED_PROXY_NETWORKS):
+        return peer
+
+    forwarded = request.headers.get("x-forwarded-for", "")
+    chain = [part.strip() for part in forwarded.split(",") if part.strip()]
+    for candidate in reversed(chain):
+        if not _ip_in_networks(candidate, _TRUSTED_PROXY_NETWORKS):
+            return candidate
+    return peer
+
+
+def _is_valid_csrf_token(token: str) -> bool:
+    return bool(token) and len(token) >= 32
+
+
+class SecurityMiddleware:
+    """
+    Adds defensive response headers and enforces a double-submit CSRF token for
+    HTML form submissions. JSON API calls (used by the live room) are exempt
+    because they are not cross-site simple requests and require a preflight
+    that this app does not allow.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive=receive)
+        path = scope.get("path", "")
+        method = scope.get("method", "GET").upper()
+
+        cookie_token = request.cookies.get(CSRF_COOKIE_NAME, "")
+        token = (
+            cookie_token
+            if _is_valid_csrf_token(cookie_token)
+            else secrets.token_urlsafe(32)
+        )
+        scope.setdefault("state", {})["csrf_token"] = token
+        set_csrf_cookie = not _is_valid_csrf_token(cookie_token)
+
+        if method not in SAFE_HTTP_METHODS and path not in CSRF_EXEMPT_PATHS:
+            content_type = (
+                request.headers.get("content-type", "").split(";")[0].strip().lower()
+            )
+            if content_type == "application/x-www-form-urlencoded":
+                body = b""
+                while True:
+                    message = await receive()
+                    chunk = message.get("body", b"")
+                    if len(body) + len(chunk) > MAX_FORM_BODY_BYTES:
+                        response = JSONResponse(
+                            {"detail": "Request body too large."}, status_code=413
+                        )
+                        await response(scope, receive, send)
+                        return
+                    body += chunk
+                    if not message.get("more_body", False):
+                        break
+                submitted = ""
+                try:
+                    parsed = urllib.parse.parse_qs(body.decode("utf-8", "replace"))
+                    submitted = (parsed.get("csrf_token") or [""])[0]
+                except Exception:
+                    submitted = ""
+                if not hmac.compare_digest(submitted, token):
+                    await self._reject(scope, receive, send)
+                    return
+                replayed = False
+
+                async def replay_body() -> Dict[str, Any]:
+                    nonlocal replayed
+                    if not replayed:
+                        replayed = True
+                        return {
+                            "type": "http.request",
+                            "body": body,
+                            "more_body": False,
+                        }
+                    return {"type": "http.request", "body": b"", "more_body": False}
+
+                receive = replay_body
+            else:
+                submitted = request.headers.get("x-csrf-token", "")
+                if not hmac.compare_digest(submitted, token):
+                    await self._reject(scope, receive, send)
+                    return
+
+        async def send_with_headers(message: Dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers.setdefault("X-Content-Type-Options", "nosniff")
+                headers.setdefault("X-Frame-Options", "DENY")
+                headers.setdefault(
+                    "Referrer-Policy", "strict-origin-when-cross-origin"
+                )
+                headers.setdefault(
+                    "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
+                )
+                if settings.BASE_URL.startswith("https://"):
+                    headers.setdefault(
+                        "Strict-Transport-Security",
+                        "max-age=31536000; includeSubDomains",
+                    )
+                if path.startswith(("/admin", "/feedback", "/room", "/booking")):
+                    headers.setdefault("X-Robots-Tag", "noindex, nofollow")
+                    headers.setdefault("Cache-Control", "no-store")
+                if set_csrf_cookie:
+                    cookie = (
+                        f"{CSRF_COOKIE_NAME}={token}; Path=/; SameSite=Lax; "
+                        "Max-Age=43200; HttpOnly"
+                    )
+                    if settings.SESSION_COOKIE_SECURE:
+                        cookie += "; Secure"
+                    headers.append("set-cookie", cookie)
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+    async def _reject(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
+        response = JSONResponse({"detail": "CSRF validation failed."}, status_code=403)
+        await response(scope, receive, send)
+
+
+app.add_middleware(SecurityMiddleware)
 
 
 def _sanitize_single_line(val: str, max_len: int = 100) -> str:
@@ -207,17 +513,9 @@ def _sanitize_workspace_files(
     return cleaned or fallback
 
 
-def _expected_admin_cookie() -> str:
-    return hmac.new(
-        settings.ADMIN_SECRET.encode("utf-8"),
-        settings.ADMIN_PASSWORD.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-
-
 def _is_admin_authenticated(request: Request) -> bool:
     cookie_val = request.cookies.get(ADMIN_COOKIE_NAME, "")
-    return hmac.compare_digest(cookie_val, _expected_admin_cookie())
+    return is_valid_admin_session(cookie_val)
 
 
 def _is_interviewer_for_session(
@@ -225,15 +523,15 @@ def _is_interviewer_for_session(
     key: Optional[str] = None,
     cookie_val: str = "",
 ) -> bool:
-    if cookie_val and hmac.compare_digest(cookie_val, _expected_admin_cookie()):
+    """
+    Interviewer access is either an authenticated admin session cookie or the
+    per-session interviewer secret. The global ADMIN_SECRET is intentionally NOT
+    accepted: it is used for internal signing and must never unlock rooms.
+    """
+    if cookie_val and is_valid_admin_session(cookie_val):
         return True
-    if key:
-        if hmac.compare_digest(key, settings.ADMIN_SECRET):
-            return True
-        if session.get("interviewer_secret") and hmac.compare_digest(
-            key, session["interviewer_secret"]
-        ):
-            return True
+    if key and session.get("interviewer_secret"):
+        return hmac.compare_digest(key, session["interviewer_secret"])
     return False
 
 
@@ -271,14 +569,11 @@ def _finalize_confirmed_session_invite(
 
 @app.get("/", response_class=HTMLResponse)
 def public_landing_page(request: Request):
-    slots = list_available_slots(max_days_ahead=MAX_BOOKING_DAYS_AHEAD)
     return templates.TemplateResponse(
         request=request,
         name="landing.html",
         context={
             "settings": settings,
-            "open_slots_count": len(slots),
-            "next_slot": slots[0] if slots else None,
         },
     )
 
@@ -324,6 +619,7 @@ def submit_booking(
     target_role: str = Form(...),
     preferred_language: str = Form("python"),
     package_type: str = Form("single"),
+    interview_mode: str = Form("classic_dsa"),
     youtube_consent: Optional[str] = Form(None),
     website_url: Optional[str] = Form(None),
 ):
@@ -337,6 +633,15 @@ def submit_booking(
             url="/book?error=Too+many+booking+requests.+Please+wait+a+minute.",
             status_code=303,
         )
+
+    mode_clean = _sanitize_single_line(interview_mode, 32).lower()
+    if mode_clean == "ai_multifile":
+        return RedirectResponse(
+            url="/book?error=AI-Assisted+Coding+interviews+are+coming+soon.+Please+select+Coding+DSA+or+Behavioural.",
+            status_code=303,
+        )
+    if mode_clean not in ("classic_dsa", "behavioral"):
+        mode_clean = "classic_dsa"
 
     yt_bool = str(youtube_consent or "").strip().lower() in ("1", "true", "on", "yes")
 
@@ -360,6 +665,7 @@ def submit_booking(
             client_ip=client_ip,
             package_type=package_type.strip(),
             youtube_consent=yt_bool,
+            interview_mode=mode_clean,
         )
     except ValueError as exc:
         q = urllib.parse.urlencode({"error": str(exc)})
@@ -449,6 +755,7 @@ def submit_bundle_booking_by_token(
     target_company: str = Form(...),
     target_role: str = Form(...),
     preferred_language: str = Form("python"),
+    interview_mode: str = Form("classic_dsa"),
 ):
     bundle = get_bundle_by_token(access_token)
     if not bundle:
@@ -457,6 +764,20 @@ def submit_bundle_booking_by_token(
         )
 
     client_ip = _get_client_ip(request)
+    if not _check_rate_limit("bundle_book_ip", client_ip, max_hits=15, window_seconds=60):
+        q = urllib.parse.urlencode(
+            {"error": "Too many booking requests. Please wait a minute."}
+        )
+        return RedirectResponse(url=f"/bundle/b/{access_token}?{q}", status_code=303)
+    mode_clean = _sanitize_single_line(interview_mode, 32).lower()
+    if mode_clean == "ai_multifile":
+        q = urllib.parse.urlencode(
+            {"error": "AI-Assisted Coding interviews are coming soon. Please select Coding DSA or Behavioural."}
+        )
+        return RedirectResponse(url=f"/bundle/b/{access_token}?{q}", status_code=303)
+    if mode_clean not in ("classic_dsa", "behavioral"):
+        mode_clean = "classic_dsa"
+
     try:
         name, _, company, role, lang = _validate_candidate_intake(
             candidate_name=candidate_name,
@@ -474,6 +795,7 @@ def submit_bundle_booking_by_token(
             preferred_language=lang,
             leetcode_solved=max(0, min(10000, int(leetcode_solved))),
             client_ip=client_ip,
+            interview_mode=mode_clean,
         )
     except ValueError as exc:
         q = urllib.parse.urlencode({"error": str(exc)})
@@ -537,9 +859,16 @@ def reschedule_calendar_page(
 
 @app.post("/reschedule/{session_id}")
 def submit_reschedule(
+    request: Request,
     session_id: str,
     slot_id: int = Form(...),
 ):
+    client_ip = _get_client_ip(request)
+    if not _check_rate_limit("reschedule_ip", client_ip, max_hits=15, window_seconds=60):
+        q = urllib.parse.urlencode(
+            {"error": "Too many reschedule attempts. Please wait a minute."}
+        )
+        return RedirectResponse(url=f"/reschedule/{session_id}?{q}", status_code=303)
     try:
         updated_session = reschedule_interview_session(session_id, slot_id)
     except ValueError as exc:
@@ -586,6 +915,10 @@ def payment_instructions_page(
     if not session:
         raise HTTPException(status_code=404, detail="Booking session not found.")
     is_confirmed = session["status"] in ("CONFIRMED", "COMPLETED")
+    show_mock_pay = not settings.REVOLUT_API_KEY and (
+        settings.IS_DEV
+        or (settings.ALLOW_MOCK_PAYMENTS and _is_admin_authenticated(request))
+    )
     return templates.TemplateResponse(
         request=request,
         name="payment.html",
@@ -596,12 +929,17 @@ def payment_instructions_page(
             "active_order_id": order_id or session.get("revolut_order_id") or "",
             "checkout_return": bool(checkout_return),
             "revolut_live_mode": bool(settings.REVOLUT_API_KEY),
+            "show_mock_pay": show_mock_pay,
         },
     )
 
 
 @app.get("/booking/{session_id}/status")
-def booking_payment_status_api(session_id: str):
+def booking_payment_status_api(request: Request, session_id: str):
+    if not _check_rate_limit(
+        "booking_status_ip", _get_client_ip(request), max_hits=60, window_seconds=60
+    ):
+        raise HTTPException(status_code=429, detail="Too many status requests.")
     session = get_session_with_slot(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Booking session not found.")
@@ -632,6 +970,12 @@ def start_revolut_checkout(
     if not session:
         raise HTTPException(status_code=404, detail="Booking session not found.")
 
+    client_ip = _get_client_ip(request)
+    if not _check_rate_limit(
+        "checkout", client_ip, max_hits=20, window_seconds=300
+    ):
+        raise HTTPException(status_code=429, detail="Too many checkout attempts.")
+
     if session["status"] in ("CONFIRMED", "COMPLETED"):
         return RedirectResponse(url=f"/booking/{session_id}/payment", status_code=303)
 
@@ -641,7 +985,6 @@ def start_revolut_checkout(
             detail=f"Cannot start checkout for booking in status '{session['status']}'.",
         )
 
-    client_ip = _get_client_ip(request)
     chosen_pkg = package_type or session.get("package_type") or "single"
     yt_bool = (
         str(youtube_consent or "").strip().lower() in ("1", "true", "on", "yes")
@@ -722,7 +1065,14 @@ async def revolut_order_webhook(request: Request):
         raise HTTPException(status_code=400, detail="Unsupported currency.")
 
     raw_amount = payload.get("amount")
-    amount_minor: Optional[int] = int(raw_amount) if raw_amount is not None else None
+    if raw_amount is None or str(raw_amount).strip() == "":
+        raise HTTPException(status_code=400, detail="Missing paid amount.")
+    try:
+        amount_minor = int(raw_amount)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid paid amount.")
+    if amount_minor <= 0:
+        raise HTTPException(status_code=400, detail="Invalid paid amount.")
 
     def _process_sync() -> Dict[str, Any]:
         target = get_session_by_revolut_order_id(order_id) if order_id else None
@@ -760,15 +1110,28 @@ async def revolut_order_webhook(request: Request):
 @app.post("/api/dev/revolut/simulate-webhook/{session_id}")
 async def dev_simulate_revolut_webhook(session_id: str, request: Request):
     """
-    Local development / sandbox helper (only active when `REVOLUT_API_KEY` is empty):
-    generates a genuinely signed `ORDER_COMPLETED` webhook payload for the session's
-    fake order and dispatches it through the real verification & confirmation pipeline.
+    Local development / sandbox helper: generates a genuinely signed
+    `ORDER_COMPLETED` webhook payload for the session's fake order and dispatches
+    it through the real verification & confirmation pipeline.
+
+    It is only available in development, or on an explicit
+    `ALLOW_MOCK_PAYMENTS=true` deployment with an authenticated admin. It is
+    always disabled when a live `REVOLUT_API_KEY` is configured.
     """
     if settings.REVOLUT_API_KEY:
         raise HTTPException(
             status_code=403,
             detail="Sandbox webhook simulator is disabled when live REVOLUT_API_KEY is configured.",
         )
+
+    if not settings.IS_DEV:
+        if not settings.ALLOW_MOCK_PAYMENTS or not _is_admin_authenticated(request):
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+    if not _check_rate_limit(
+        "dev_simulate_webhook", _get_client_ip(request), max_hits=10, window_seconds=60
+    ):
+        raise HTTPException(status_code=429, detail="Too many requests.")
 
     session = await run_in_threadpool(get_session_with_slot, session_id)
     if not session:
@@ -787,7 +1150,7 @@ async def dev_simulate_revolut_webhook(session_id: str, request: Request):
             checkout_url,
         )
 
-    amount_minor = int(session.get("price_eur") or 70) * 100
+    amount_minor = int(session.get("price_eur") or settings.PRICE_SINGLE_STANDARD_EUR) * 100
     raw_bytes, signed_headers = build_completed_webhook_request(
         order_id=order_id,
         session_id=session_id,
@@ -850,7 +1213,6 @@ def admin_dashboard(
         )
 
     categorized = list_sessions_by_category()
-    all_slots = list_all_slots()
     weekly_schedule = get_weekly_schedule()
     slots_by_rome_date = list_slots_by_rome_date()
 
@@ -862,7 +1224,6 @@ def admin_dashboard(
             "is_authenticated": True,
             "initial_tab": tab,
             "sessions": categorized,
-            "all_slots": all_slots,
             "weekly_schedule": weekly_schedule,
             "slots_by_rome_date": slots_by_rome_date,
             "flash_message": _sanitize_single_line(msg or "", 240) if msg else None,
@@ -880,20 +1241,23 @@ def admin_login(request: Request, password: str = Form(...)):
         )
 
     if hmac.compare_digest(password.strip(), settings.ADMIN_PASSWORD):
+        token = create_admin_session()
         response = RedirectResponse(url="/admin", status_code=303)
         response.set_cookie(
             key=ADMIN_COOKIE_NAME,
-            value=_expected_admin_cookie(),
+            value=token,
             httponly=True,
-            max_age=60 * 60 * 24 * 14,
+            max_age=settings.ADMIN_SESSION_TTL_SECONDS,
             samesite="lax",
+            secure=settings.SESSION_COOKIE_SECURE,
         )
         return response
     return RedirectResponse(url="/admin?error=Invalid+admin+password", status_code=303)
 
 
 @app.get("/admin/logout")
-def admin_logout():
+def admin_logout(request: Request):
+    revoke_admin_session(request.cookies.get(ADMIN_COOKIE_NAME, ""))
     response = RedirectResponse(url="/admin", status_code=303)
     response.delete_cookie(ADMIN_COOKIE_NAME)
     return response
@@ -982,56 +1346,6 @@ def api_set_date_hours(
     )
 
 
-@app.post("/admin/slots/standard-rome")
-def admin_apply_standard_rome_schedule(
-    request: Request,
-    days_ahead: int = Form(60),
-    clear_unbooked: Optional[str] = Form(None),
-):
-    if not _is_admin_authenticated(request):
-        raise HTTPException(status_code=403, detail="Unauthorized")
-
-    added = seed_rome_availability_schedule(
-        days_ahead=min(60, max(7, days_ahead)),
-        clear_unbooked=(clear_unbooked == "on"),
-    )
-    q = urllib.parse.urlencode(
-        {"tab": "slots", "msg": f"Synced weekly Europe/Rome schedule ({added} slots generated)"}
-    )
-    return RedirectResponse(url=f"/admin?{q}", status_code=303)
-
-
-@app.post("/admin/slots/add")
-def admin_add_slot(
-    request: Request,
-    slot_date: str = Form(...),
-    slot_time: str = Form(...),
-    duration_minutes: int = Form(60),
-):
-    if not _is_admin_authenticated(request):
-        raise HTTPException(status_code=403, detail="Unauthorized")
-
-    try:
-        naive_dt = datetime.fromisoformat(f"{slot_date.strip()}T{slot_time.strip()}:00")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid slot_date or slot_time format.")
-    rome_dt = naive_dt.replace(tzinfo=ROME_TZ)
-    start_utc = rome_dt.astimezone(timezone.utc)
-    end_utc = start_utc + timedelta(minutes=max(15, min(240, int(duration_minutes))))
-    create_slot(start_utc.isoformat(), end_utc.isoformat())
-    return RedirectResponse(
-        url="/admin?tab=slots&msg=Added+new+availability+slot+(Europe/Rome)", status_code=303
-    )
-
-
-@app.post("/admin/slots/{slot_id}/delete")
-def admin_delete_slot(request: Request, slot_id: int):
-    if not _is_admin_authenticated(request):
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    delete_slot(slot_id)
-    return RedirectResponse(url="/admin?tab=slots&msg=Slot+removed", status_code=303)
-
-
 @app.post("/admin/session/{session_id}/approve")
 def admin_approve_booking(
     request: Request,
@@ -1055,6 +1369,16 @@ def admin_approve_booking(
             {
                 "tab": "upcoming",
                 "msg": "Original slot was already taken by another booking; session marked for reschedule.",
+            }
+        )
+        return RedirectResponse(url=f"/admin?{q}", status_code=303)
+
+    if not updated or updated["status"] != "CONFIRMED":
+        status_label = updated["status"] if updated else "UNKNOWN"
+        q = urllib.parse.urlencode(
+            {
+                "tab": "upcoming",
+                "msg": f"Cannot approve session in status '{status_label}'.",
             }
         )
         return RedirectResponse(url=f"/admin?{q}", status_code=303)
@@ -1204,6 +1528,15 @@ def admin_save_breakdown(
     if not _is_admin_authenticated(request):
         raise HTTPException(status_code=403, detail="Unauthorized")
 
+    session = get_session_with_slot(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.get("breakdown_sent_at"):
+        raise HTTPException(
+            status_code=409,
+            detail="Judgement already sent; the breakdown is locked and cannot be edited.",
+        )
+
     verdict_clean = final_verdict if final_verdict in VERDICT_OPTIONS else None
     update_rubric_notes(
         session_id,
@@ -1230,7 +1563,6 @@ def admin_save_breakdown(
 def candidate_feedback_page(
     request: Request,
     session_id: str,
-    key: Optional[str] = Query(None),
 ):
     """
     Candidate-facing session breakdown & judgement page.
@@ -1242,11 +1574,7 @@ def candidate_feedback_page(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    is_admin_viewer = _is_interviewer_for_session(
-        session,
-        key=key,
-        cookie_val=request.cookies.get(ADMIN_COOKIE_NAME, ""),
-    )
+    is_admin_viewer = _is_admin_authenticated(request)
     if not session.get("breakdown_sent_at") and session.get("status") != "COMPLETED" and not is_admin_viewer:
         raise HTTPException(
             status_code=404,
@@ -1264,22 +1592,20 @@ def candidate_feedback_page(
     )
 
 
-@app.get("/admin/session/{session_id}/pdf")
-def admin_preview_breakdown_redirect(request: Request, session_id: str):
-    return RedirectResponse(url=f"/feedback/{session_id}", status_code=303)
-
-
 @app.post("/admin/session/{session_id}/send-breakdown")
 async def admin_send_breakdown_in_thread(request: Request, session_id: str):
     if not _is_admin_authenticated(request):
         raise HTTPException(status_code=403, detail="Unauthorized")
 
+    await room_manager.flush_workspace_save(session_id)
     session = await run_in_threadpool(get_session_with_slot, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
     sent_live = await run_in_threadpool(send_breakdown_email, session)
-    await run_in_threadpool(mark_session_completed, session_id, True)
+    already_sent = bool(session.get("breakdown_sent_at"))
+    if not already_sent:
+        await run_in_threadpool(mark_session_completed, session_id, True)
 
     # Immediately lock any open candidate room tabs and redirect them to the feedback breakdown page
     await room_manager.broadcast(
@@ -1290,11 +1616,16 @@ async def admin_send_breakdown_in_thread(request: Request, session_id: str):
         },
     )
 
-    status_note = (
-        "Sent breakdown page link in original email thread via Gmail SMTP"
-        if sent_live
-        else "Saved threaded reply .eml with breakdown link to uploads/email_outbox"
-    )
+    if already_sent:
+        status_note = (
+            "Resent the same breakdown link in the original email thread (content unchanged)"
+            if sent_live
+            else "Resent the same breakdown link via saved .eml (content unchanged)"
+        )
+    elif sent_live:
+        status_note = "Sent breakdown page link in original email thread via Gmail SMTP"
+    else:
+        status_note = "Saved threaded reply .eml with breakdown link to uploads/email_outbox"
     q = urllib.parse.urlencode({"msg": status_note})
     return RedirectResponse(
         url=f"/admin/session/{session_id}?{q}",
@@ -1311,7 +1642,7 @@ async def admin_send_breakdown_in_thread(request: Request, session_id: str):
 def interview_room_page(
     request: Request,
     session_id: str,
-    key: Optional[str] = Query(None),
+    key: Optional[str] = Query(default=None),
 ):
     session = get_session_with_slot(session_id)
     if not session:
@@ -1319,7 +1650,7 @@ def interview_room_page(
 
     is_interviewer = _is_interviewer_for_session(
         session,
-        key=key,
+        key=key or request.headers.get("x-interviewer-key"),
         cookie_val=request.cookies.get(ADMIN_COOKIE_NAME, ""),
     )
 
@@ -1347,7 +1678,7 @@ def api_autosave_rubric(
     request: Request,
     session_id: str,
     payload: RubricUpdatePayload,
-    key: Optional[str] = Query(None),
+    interviewer_key: Optional[str] = Header(default=None, alias="X-Interviewer-Key"),
 ):
     session = get_session_with_slot(session_id)
     if not session:
@@ -1355,68 +1686,132 @@ def api_autosave_rubric(
 
     authorized = _is_interviewer_for_session(
         session,
-        key=key,
+        key=interviewer_key,
         cookie_val=request.cookies.get(ADMIN_COOKIE_NAME, ""),
     )
     if not authorized:
         raise HTTPException(status_code=403, detail="Forbidden")
+    if session.get("breakdown_sent_at"):
+        raise HTTPException(
+            status_code=409,
+            detail="Judgement already sent; the rubric is locked and cannot be edited.",
+        )
 
+    room_manager.flush_workspace_save_sync(session_id)
     updated = update_rubric_notes(session_id, payload.model_dump())
     return JSONResponse({"status": "saved", "final_verdict": updated.get("final_verdict")})
 
 
-class RoomConnectionManager:
-    def __init__(self) -> None:
-        self.active_rooms: Dict[str, List[WebSocket]] = {}
-
-    async def connect(self, session_id: str, websocket: WebSocket) -> None:
-        await websocket.accept()
-        self.active_rooms.setdefault(session_id, []).append(websocket)
-
-    def disconnect(self, session_id: str, websocket: WebSocket) -> None:
-        conns = self.active_rooms.get(session_id, [])
-        if websocket in conns:
-            conns.remove(websocket)
-        if not conns and session_id in self.active_rooms:
-            del self.active_rooms[session_id]
-
-    async def broadcast(
-        self, session_id: str, message: Dict[str, Any], sender: Optional[WebSocket] = None
-    ) -> None:
-        conns = list(self.active_rooms.get(session_id, []))
-        for conn in conns:
-            if sender is not None and conn is sender:
-                continue
-            try:
-                await conn.send_json(message)
-            except Exception:
-                self.disconnect(session_id, conn)
-
-
-room_manager = RoomConnectionManager()
+def _safe_int(val: Any, default: int, lo: int, hi: int) -> int:
+    try:
+        n = int(val)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, n))
 
 
 @app.websocket("/ws/room/{session_id}")
 async def websocket_interview_room(websocket: WebSocket, session_id: str):
     session = await run_in_threadpool(get_session_with_slot, session_id)
-    if not session:
+    if not session or session["status"] not in ("CONFIRMED", "COMPLETED"):
         await websocket.close(code=1008)
         return
 
-    ws_key = websocket.query_params.get("key")
+    ws_key = None
+    offered_subprotocols = [
+        part.strip()
+        for part in websocket.headers.get("sec-websocket-protocol", "").split(",")
+        if part.strip()
+    ]
+    for part in offered_subprotocols:
+        if part != "stronghire.v1":
+            ws_key = part
+            break
     ws_cookie = websocket.cookies.get(ADMIN_COOKIE_NAME, "")
     is_interviewer_ws = _is_interviewer_for_session(
         session, key=ws_key, cookie_val=ws_cookie
     )
 
-    await room_manager.connect(session_id, websocket)
+    await room_manager.connect(
+        session_id,
+        websocket,
+        subprotocol="stronghire.v1" if "stronghire.v1" in offered_subprotocols else None,
+    )
+    ws_rate_key = f"{session_id}:{id(websocket)}"
     try:
         while True:
-            data = await websocket.receive_json()
+            raw_text = await websocket.receive_text()
+            if len(raw_text.encode("utf-8", errors="ignore")) > MAX_WS_MESSAGE_BYTES:
+                continue
+            if not _check_rate_limit("ws_msg", ws_rate_key, max_hits=200, window_seconds=5):
+                continue
+            try:
+                data = json.loads(raw_text)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
             msg_type = data.get("type")
+
+            if msg_type == "cursor_move":
+                cursor_data = data.get("cursor")
+                sender_role = "interviewer" if is_interviewer_ws else "candidate"
+                sender_name = (
+                    "Interviewer"
+                    if is_interviewer_ws
+                    else session["candidate_name"]
+                )
+                filename = str(data.get("filename") or "")[:255]
+                if isinstance(cursor_data, dict):
+                    row = _safe_int(cursor_data.get("row", 0), 0, 0, 50000)
+                    col = _safe_int(cursor_data.get("column", 0), 0, 0, 5000)
+                    valid_cursor = {"row": row, "column": col}
+                else:
+                    valid_cursor = None
+
+                selection_data = data.get("selection")
+                if isinstance(selection_data, dict):
+                    s_start = selection_data.get("start") or {}
+                    s_end = selection_data.get("end") or {}
+                    if isinstance(s_start, dict) and isinstance(s_end, dict):
+                        valid_selection = {
+                            "start": {
+                                "row": _safe_int(s_start.get("row", 0), 0, 0, 50000),
+                                "column": _safe_int(s_start.get("column", 0), 0, 0, 5000),
+                            },
+                            "end": {
+                                "row": _safe_int(s_end.get("row", 0), 0, 0, 50000),
+                                "column": _safe_int(s_end.get("column", 0), 0, 0, 5000),
+                            },
+                        }
+                    else:
+                        valid_selection = None
+                else:
+                    valid_selection = None
+
+                await room_manager.broadcast(
+                    session_id,
+                    {
+                        "type": "remote_cursor",
+                        "role": sender_role,
+                        "name": sender_name,
+                        "filename": filename,
+                        "cursor": valid_cursor,
+                        "selection": valid_selection,
+                    },
+                    sender=websocket,
+                )
+                continue
+
             current = await run_in_threadpool(get_session_with_slot, session_id)
             if not current:
                 break
+
+            # If there is an uncommitted in-memory save pending for this room, use its files
+            pending_state = room_manager.pending_saves.get(session_id)
+            if pending_state:
+                current["workspace_files"] = pending_state["workspace_files"]
+                current["active_filename"] = pending_state["active_filename"]
 
             # Once feedback has been sent, prevent any edits to the shared code document
             if current["status"] == "COMPLETED" or current.get("breakdown_sent_at"):
@@ -1431,15 +1826,8 @@ async def websocket_interview_room(websocket: WebSocket, session_id: str):
                 active_filename = str(data.get("active_filename") or current["active_filename"])
                 if active_filename not in cleaned_files:
                     active_filename = next(iter(cleaned_files.keys()))
-                await run_in_threadpool(
-                    update_workspace_state,
-                    session_id,
-                    cleaned_files,
-                    active_filename,
-                    current["syntax_highlighting_enabled"],
-                    current["editor_language"],
-                    current["interview_mode"],
-                )
+
+                # 1. Instant in-memory broadcast to peer (<5ms, zero disk wait)
                 await room_manager.broadcast(
                     session_id,
                     {
@@ -1448,6 +1836,17 @@ async def websocket_interview_room(websocket: WebSocket, session_id: str):
                         "workspace_files": cleaned_files,
                     },
                     sender=websocket,
+                )
+
+                # 2. Debounced background SQLite write every 30 seconds
+                room_manager.queue_workspace_save(
+                    session_id=session_id,
+                    workspace_files=cleaned_files,
+                    active_filename=active_filename,
+                    syntax_enabled=current["syntax_highlighting_enabled"],
+                    editor_lang=current["editor_language"],
+                    interview_mode=current["interview_mode"],
+                    delay_seconds=30.0,
                 )
 
             elif msg_type == "config_update":
@@ -1463,7 +1862,7 @@ async def websocket_interview_room(websocket: WebSocket, session_id: str):
                 if editor_lang not in ALLOWED_LANGUAGE_KEYS:
                     editor_lang = current["editor_language"]
                 interview_mode = str(data.get("interview_mode") or current["interview_mode"])
-                if interview_mode not in ("classic_dsa", "ai_multifile"):
+                if interview_mode not in ("classic_dsa", "ai_multifile", "behavioral"):
                     interview_mode = current["interview_mode"]
                 await run_in_threadpool(
                     update_workspace_state,
@@ -1494,15 +1893,8 @@ async def websocket_interview_room(websocket: WebSocket, session_id: str):
                 active_filename = str(data.get("active_filename") or current["active_filename"])
                 if active_filename not in cleaned_files:
                     active_filename = next(iter(cleaned_files.keys()))
-                await run_in_threadpool(
-                    update_workspace_state,
-                    session_id,
-                    cleaned_files,
-                    active_filename,
-                    current["syntax_highlighting_enabled"],
-                    current["editor_language"],
-                    current["interview_mode"],
-                )
+
+                # 1. Instant peer broadcast
                 await room_manager.broadcast(
                     session_id,
                     {
@@ -1513,13 +1905,29 @@ async def websocket_interview_room(websocket: WebSocket, session_id: str):
                     sender=websocket,
                 )
 
+                # 2. Queue background DB write
+                room_manager.queue_workspace_save(
+                    session_id=session_id,
+                    workspace_files=cleaned_files,
+                    active_filename=active_filename,
+                    syntax_enabled=current["syntax_highlighting_enabled"],
+                    editor_lang=current["editor_language"],
+                    interview_mode=current["interview_mode"],
+                    delay_seconds=30.0,
+                )
+
             elif msg_type == "ai_prompt":
                 if current.get("interview_mode") != "ai_multifile" and not is_interviewer_ws:
                     continue
                 prompt_text = str(data.get("prompt") or "").strip()[:MAX_AI_PROMPT_CHARS]
                 if not prompt_text:
                     continue
-                active_filename = str(data.get("active_filename") or current["active_filename"])
+                raw_active = str(data.get("active_filename") or "")
+                active_filename = (
+                    raw_active
+                    if SAFE_FILENAME_RE.match(raw_active) and raw_active in current["workspace_files"]
+                    else current["active_filename"]
+                )
                 ai_entry = await run_in_threadpool(
                     generate_ai_coding_response,
                     prompt_text,
@@ -1539,6 +1947,18 @@ async def websocket_interview_room(websocket: WebSocket, session_id: str):
                 )
     except WebSocketDisconnect:
         room_manager.disconnect(session_id, websocket)
+        await room_manager.flush_workspace_save(session_id)
+        await room_manager.broadcast(
+            session_id,
+            {"type": "remote_cursor_leave", "role": "interviewer" if is_interviewer_ws else "candidate"},
+            sender=websocket,
+        )
     except Exception as exc:
         logger.warning("WebSocket error in room %s: %s", session_id, exc)
         room_manager.disconnect(session_id, websocket)
+        await room_manager.flush_workspace_save(session_id)
+        await room_manager.broadcast(
+            session_id,
+            {"type": "remote_cursor_leave", "role": "interviewer" if is_interviewer_ws else "candidate"},
+            sender=websocket,
+        )

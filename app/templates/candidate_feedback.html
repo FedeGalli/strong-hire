@@ -14,16 +14,17 @@
                 Interview Breakdown: {{ session.candidate_name }}
             </h1>
             <p class="text-xs sm:text-sm text-zinc-500 mt-1.5">
-                Target: <strong class="text-zinc-900">{{ session.target_role }} @ {{ session.target_company }}</strong>
+                Type: <strong class="text-zinc-900">{% if session.interview_mode == 'behavioral' %}Behavioural{% elif session.interview_mode == 'ai_multifile' %}AI-Assisted{% else %}Coding DSA{% endif %}</strong>
+                &bull; Target: <strong class="text-zinc-900">{{ session.target_role }} @ {{ session.target_company }}</strong>
                 &bull; Language: <strong class="text-zinc-900">{{ session.preferred_language | upper }}</strong>
                 &bull; Date: <span class="utc-datetime font-medium text-zinc-800">{{ session.start_time }}</span>
             </p>
         </div>
 
         <div class="flex items-center gap-2.5 self-start sm:self-center">
-            {% if session.bundle_id and session.bundle_credits_remaining and session.bundle_credits_remaining > 0 %}
+            {% if session.bundle_access_token and session.bundle_credits_remaining and session.bundle_credits_remaining > 0 %}
             <a
-                href="/bundle/{{ session.bundle_id }}"
+                href="/bundle/b/{{ session.bundle_access_token }}"
                 class="px-4 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-white text-xs font-semibold transition"
             >
                 Schedule Next Bundle Session ({{ session.bundle_credits_remaining }} Left) &rarr;

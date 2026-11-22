@@ -1,5 +1,6 @@
 import html
 import logging
+import os
 import smtplib
 import ssl
 from datetime import datetime, timezone
@@ -44,6 +45,10 @@ def _deliver_message(msg: EmailMessage, prefix: str = "email") -> bool:
     When SMTP credentials are not configured (local dev/test mode), writes a full RFC-2822
     `.eml` file into `uploads/email_outbox/` for inspection.
     """
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("TESTING") == "1":
+        logger.info("Test environment detected; skipping live SMTP delivery for %s", prefix)
+        return False
+
     if not settings.SMTP_USER or not settings.SMTP_APP_PASSWORD:
         now = datetime.now(timezone.utc)
         timestamp = now.strftime("%Y%m%d_%H%M%S_%f")
@@ -173,12 +178,18 @@ def send_admin_booking_notification(session: Dict[str, Any]) -> bool:
         if session.get("youtube_consent")
         else "No — Private Session"
     )
-    price_eur = int(session.get("price_eur") or 70)
+    price_eur = int(session.get("price_eur") or settings.PRICE_SINGLE_STANDARD_EUR)
+    mode_label = (
+        "Behavioural Interview"
+        if session.get("interview_mode") == "behavioral"
+        else ("AI-Assisted Coding" if session.get("interview_mode") == "ai_multifile" else "Coding DSA Interview")
+    )
 
     plain_body = (
         f"Hello {settings.INTERVIEWER_NAME},\n\n"
         f"A new candidate has booked a mock interview slot.\n\n"
         f"• Candidate: {cand_name} ({cand_email})\n"
+        f"• Interview Type: {mode_label}\n"
         f"• Slot: {slot_str}\n"
         f"• Package: {pkg_label} (€{price_eur})\n"
         f"• YouTube Publication Consent: {yt_label}\n"
@@ -192,6 +203,10 @@ def send_admin_booking_notification(session: Dict[str, Any]) -> bool:
             <tr>
                 <td style="padding: 6px 0; color: #71717a; width: 40%;">Candidate</td>
                 <td style="padding: 6px 0; font-weight: 600;">{_esc(cand_name)} ({_esc(cand_email)})</td>
+            </tr>
+            <tr>
+                <td style="padding: 6px 0; color: #71717a;">Interview Type</td>
+                <td style="padding: 6px 0; font-weight: 600;">{_esc(mode_label)}</td>
             </tr>
             <tr>
                 <td style="padding: 6px 0; color: #71717a;">Date &amp; Time</td>
@@ -252,6 +267,11 @@ def send_invitation_email(
 
     message_id = existing_msg_id or f"<interview-{session_id}@{settings.SMTP_DOMAIN}>"
     subject = existing_subject or f"Mock Interview Session - {cand_name} ({short_date})"
+    mode_label = (
+        "Behavioural Mock Interview"
+        if session.get("interview_mode") == "behavioral"
+        else ("AI-Assisted Coding" if session.get("interview_mode") == "ai_multifile" else "Coding DSA Mock Interview")
+    )
     room_url = f"{settings.BASE_URL}/room/{session_id}"
     ics_url = f"{settings.BASE_URL}/booking/{session_id}/ics"
     sender_email = _clean_header(settings.SMTP_USER or settings.ADMIN_EMAIL)
@@ -276,8 +296,9 @@ def send_invitation_email(
         f"You're all set, {cand_name}!\n\n"
         f"Your 1-on-1 Software Engineering Mock Interview is confirmed.\n\n"
         f"SESSION DETAILS\n"
+        f"• Interview Type: {mode_label}\n"
         f"• Date & Time:\n  {date_part}\n  {time_part}\n"
-        f"• Duration:\n  {settings.SESSION_DURATION_MINUTES} minutes\n  (Coding + Result Discussion)\n"
+        f"• Duration:\n  {settings.SESSION_DURATION_MINUTES} minutes\n  (Interview + Debrief)\n"
         f"• Target Role & Company: {session['target_role']} @ {session['target_company']}\n"
         f"• Coding Language: {lang_display}\n"
         f"• Join Google Meet Call: {meet_url}\n"
@@ -286,11 +307,24 @@ def send_invitation_email(
         f"• Requirements: Make sure you have a working microphone, a PC (desktop or laptop browser), and stable internet access so we can communicate clearly while coding in real time.\n"
         f"• Arrival Time: Please join 5 minutes before the call starts to quickly verify your audio and setup so we can begin right on time and dedicate the full hour to your session.\n"
         f"• The Loop: You will need to join the Google Meet call and open the Live Coding Editor ({room_url} - the workspace is already open, so feel free to visit the link beforehand to familiarize yourself with it if needed). The session is structured as a 45 min mock interview + 15 min feedback discussion, followed by a written Feedback Breakdown with your score and targeted practice assignments.\n\n"
-        f"After our session, I will reply directly in this same email thread with the link to your personalized Feedback Breakdown page.\n"
+        f"After our session, I will reply directly in this same email thread with the link to your personalized Feedback Breakdown page.\n\n"
+        f"NEED ASSISTANCE OR NEED TO RESCHEDULE?\n"
+        f"If you have any questions, encounter any problems, need assistance, or need to reschedule the call, feel free to reply directly to this email at any time.\n"
     )
 
     details_html = f"""
         <table style="width: 100%; border-collapse: collapse; font-size: 13px; color: #18181b;">
+            <tr>
+                <td style="padding: 0 12px 14px 0; width: 50%; vertical-align: top;">
+                    <div style="font-size: 12px; color: #a1a1aa; margin-bottom: 2px;">Interview Type</div>
+                    <div style="font-weight: 600; color: #18181b;">{_esc(mode_label)}</div>
+                </td>
+                <td style="padding: 0 0 14px 12px; width: 50%; vertical-align: top;">
+                    <div style="font-size: 12px; color: #a1a1aa; margin-bottom: 2px;">Duration</div>
+                    <div style="font-weight: 600; color: #18181b;">{int(settings.SESSION_DURATION_MINUTES)} minutes</div>
+                    <div style="font-size: 12px; color: #71717a; font-weight: 400;">(Interview + Debrief)</div>
+                </td>
+            </tr>
             <tr>
                 <td style="padding: 0 12px 14px 0; width: 50%; vertical-align: top;">
                     <div style="font-size: 12px; color: #a1a1aa; margin-bottom: 2px;">Date &amp; Time</div>
@@ -298,19 +332,14 @@ def send_invitation_email(
                     <div style="font-weight: 600; color: #18181b;">{_esc(time_part)}</div>
                 </td>
                 <td style="padding: 0 0 14px 12px; width: 50%; vertical-align: top;">
-                    <div style="font-size: 12px; color: #a1a1aa; margin-bottom: 2px;">Duration</div>
-                    <div style="font-weight: 600; color: #18181b;">{int(settings.SESSION_DURATION_MINUTES)} minutes</div>
-                    <div style="font-size: 12px; color: #71717a; font-weight: 400;">(Coding + Result Discussion)</div>
+                    <div style="font-size: 12px; color: #a1a1aa; margin-bottom: 2px;">Coding Language</div>
+                    <div style="font-weight: 600; color: #18181b;">{_esc(lang_display)}</div>
                 </td>
             </tr>
             <tr>
-                <td style="padding: 0 12px 4px 0; width: 50%; vertical-align: top;">
+                <td colspan="2" style="padding: 0 0 4px 0; width: 100%; vertical-align: top;">
                     <div style="font-size: 12px; color: #a1a1aa; margin-bottom: 2px;">Target Role &amp; Company</div>
                     <div style="font-weight: 600; color: #18181b;">{_esc(session['target_role'])} @ {_esc(session['target_company'])}</div>
-                </td>
-                <td style="padding: 0 0 4px 12px; width: 50%; vertical-align: top;">
-                    <div style="font-size: 12px; color: #a1a1aa; margin-bottom: 2px;">Coding Language</div>
-                    <div style="font-weight: 600; color: #18181b;">{_esc(lang_display)}</div>
                 </td>
             </tr>
         </table>
@@ -320,7 +349,7 @@ def send_invitation_email(
                 <tr>
                     <td style="width: 50%; padding-right: 6px; padding-bottom: 10px;">
                         <a href="{_esc(meet_url)}" style="display: block; width: 100%; box-sizing: border-box; background-color: #18181b; color: #ffffff; text-decoration: none; font-weight: 600; font-size: 12px; padding: 12px 14px; border-radius: 12px; text-align: center;">
-                            <span style="color: #34d399;">&bull;</span>&nbsp; Join Google Meet Call &nbsp;&nearr;
+                            <span style="color: #34d399;">&bull;</span>&nbsp; Join Google Meet Call &nbsp;&#8599;
                         </a>
                     </td>
                     <td style="width: 50%; padding-left: 6px; padding-bottom: 10px;">
@@ -332,7 +361,7 @@ def send_invitation_email(
                 <tr>
                     <td colspan="2">
                         <a href="{_esc(ics_url)}" style="display: block; width: 100%; box-sizing: border-box; background-color: #ffffff; color: #18181b; border: 1px solid #e4e4e7; text-decoration: none; font-weight: 600; font-size: 12px; padding: 10px 16px; border-radius: 12px; text-align: center;">
-                            Download Calendar Invite (.ics)
+                            Download Calendar Invite
                         </a>
                     </td>
                 </tr>
@@ -382,10 +411,17 @@ def send_invitation_email(
     html_body = _render_unified_email_card(
         badge_text="Booking Confirmed • Invitation & Room Ready",
         title=f"You're all set, {cand_name}!",
-        intro_html="Your 1-on-1 Software Engineering Mock Interview is confirmed, and a calendar <code>.ics</code> invite is attached to this email. Below you will find your session summary, direct links to the video call and shared coding workspace, and how to prepare.",
+        intro_html="Your 1-on-1 Software Engineering Mock Interview is confirmed, and a calendar invite is attached to this email. Below you will find your session summary, direct links to the video call and shared coding workspace, and how to prepare.",
         details_box_html=details_html,
         extra_section_html=checklist_html,
-        footer_note_html="After our session, you will receive a reply <strong>directly in this same email thread</strong> with the link to your personalized <em>Feedback Breakdown</em> page.",
+        footer_note_html=(
+            '<div style="margin-bottom: 10px;">'
+            "After our session, you will receive a reply <strong>directly in this same email thread</strong> with the link to your personalized <em>Feedback Breakdown</em> page."
+            "</div>"
+            '<div style="background-color: #f4f4f5; border: 1px solid #e4e4e7; border-radius: 10px; padding: 12px 14px; font-size: 13px; color: #52525b; line-height: 1.5;">'
+            '<strong style="color: #18181b;">Questions, Assistance &amp; Rescheduling:</strong> If you have any problems, need assistance, have questions, or need to reschedule the call, feel free to <strong>reply directly to this email</strong> at any time.'
+            "</div>"
+        ),
     )
 
     msg.set_content(plain_body)

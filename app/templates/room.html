@@ -12,6 +12,94 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/mode-rust.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/theme-tomorrow_night.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.36.2/theme-chrome.min.js"></script>
+<style>
+/* Remote Collaborator Cursor in Ace Editor */
+.remote-cursor {
+    position: absolute;
+    width: 2px;
+    pointer-events: auto !important;
+    z-index: 25 !important;
+    transition: top 0.04s ease-out, left 0.04s ease-out;
+}
+.remote-cursor::before {
+    content: '';
+    position: absolute;
+    top: -2px;
+    left: -7px;
+    width: 16px;
+    height: calc(100% + 4px);
+    cursor: default;
+}
+/* Light Theme Colors */
+.remote-cursor-interviewer {
+    background-color: #2563eb;
+}
+.remote-cursor-interviewer .remote-cursor-tooltip {
+    background-color: #2563eb;
+}
+.remote-cursor-candidate {
+    background-color: #7c3aed;
+}
+.remote-cursor-candidate .remote-cursor-tooltip {
+    background-color: #7c3aed;
+}
+
+/* Night Mode Colors (Tomorrow Night) */
+.ace-tomorrow-night .remote-cursor-interviewer {
+    background-color: #60a5fa;
+}
+.ace-tomorrow-night .remote-cursor-interviewer .remote-cursor-tooltip {
+    background-color: #2563eb;
+}
+.ace-tomorrow-night .remote-cursor-candidate {
+    background-color: #c084fc;
+}
+.ace-tomorrow-night .remote-cursor-candidate .remote-cursor-tooltip {
+    background-color: #7c3aed;
+}
+
+.remote-cursor-tooltip {
+    display: none;
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    margin-bottom: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-weight: 600;
+    white-space: nowrap;
+    border-radius: 4px;
+    color: #ffffff;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+    pointer-events: none;
+    z-index: 30;
+    line-height: 1.3;
+}
+.remote-cursor:hover .remote-cursor-tooltip {
+    display: block;
+}
+
+/* Remote Text Selection Highlight */
+.remote-selection {
+    position: absolute;
+    z-index: 15 !important;
+    border-radius: 2px;
+}
+.remote-selection-interviewer {
+    background-color: rgba(37, 99, 235, 0.22) !important;
+}
+.remote-selection-candidate {
+    background-color: rgba(124, 58, 237, 0.22) !important;
+}
+.ace-tomorrow-night .remote-selection-interviewer {
+    background-color: rgba(96, 165, 250, 0.28) !important;
+}
+.ace-tomorrow-night .remote-selection-candidate {
+    background-color: rgba(192, 132, 252, 0.28) !important;
+}
+</style>
 {% endblock %}
 
 {% block navbar %}{% endblock %}
@@ -22,12 +110,25 @@
     <!-- Top Room Control Bar (Minimalist White) -->
     <header class="h-14 shrink-0 border-b border-zinc-200 bg-white px-4 flex items-center justify-between gap-4">
         <div class="flex items-center gap-3">
-            <a href="{{ '/admin' if is_interviewer else '/' }}" class="w-8 h-8 rounded-lg bg-zinc-900 flex items-center justify-center font-mono font-bold text-xs text-white">
-                &lt;/&gt;
+            <a href="{{ '/admin' if is_interviewer else '/' }}" class="shrink-0">
+                <img
+                    src="/static/stronghire-logo.svg"
+                    alt="{{ settings.APP_TITLE }} logo"
+                    class="w-9 h-9 rounded-lg object-cover shadow-sm hover:opacity-90 transition"
+                />
             </a>
             <div>
                 <div class="flex items-center gap-2">
                     <span class="font-semibold text-sm text-zinc-900">{{ session.candidate_name }}</span>
+                    {% if session.interview_mode == 'behavioral' %}
+                    <span class="px-2 py-0.5 rounded text-[11px] font-semibold bg-purple-50 text-purple-700 border border-purple-200">
+                        Behavioural
+                    </span>
+                    {% else %}
+                    <span class="px-2 py-0.5 rounded text-[11px] font-semibold bg-zinc-100 text-zinc-700 border border-zinc-200">
+                        Coding DSA
+                    </span>
+                    {% endif %}
                     {% if is_interviewer %}
                     <span class="px-2 py-0.5 rounded text-[11px] font-semibold bg-zinc-900 text-white">
                         INTERVIEWER VIEW
@@ -83,18 +184,66 @@
                     class="bg-white border border-zinc-200 rounded-lg px-2 py-1 text-xs text-zinc-700 focus:outline-none focus:border-zinc-900"
                 >
                     <option value="classic_dsa" {% if session.interview_mode == 'classic_dsa' %}selected{% endif %}>
-                        Mode: Classic DSA
+                        Mode: Coding DSA
                     </option>
-                    <option value="ai_multifile" {% if session.interview_mode == 'ai_multifile' %}selected{% endif %}>
-                        Mode: v2 AI Multi-File
+                    <option value="behavioral" {% if session.interview_mode == 'behavioral' %}selected{% endif %}>
+                        Mode: Behavioural
+                    </option>
+                    <option value="ai_multifile" disabled {% if session.interview_mode == 'ai_multifile' %}selected{% endif %}>
+                        Mode: AI-Assisted (Coming Soon)
                     </option>
                 </select>
             </div>
             {% endif %}
         </div>
 
-        <!-- Right Controls: Google Meet + Finalize Link -->
+        <!-- Right Controls: Interviewer Timer + Google Meet + Finalize Link -->
         <div class="flex items-center gap-2.5">
+            {% if is_interviewer %}
+            <!-- Interviewer Timer Pill (Header) -->
+            <div id="interviewer-timer" class="flex items-center gap-1.5 bg-zinc-900 text-white rounded-xl px-2.5 py-1 text-xs shadow-2xs font-mono select-none">
+                <svg class="w-3.5 h-3.5 text-zinc-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span id="timer-display" class="font-bold text-sm tracking-wider min-w-[46px] text-center">45:00</span>
+                <div class="flex items-center gap-0.5 border-l border-zinc-700 pl-1.5 ml-0.5">
+                    <button
+                        type="button"
+                        id="timer-toggle-btn"
+                        title="Start / Pause Timer"
+                        class="p-1 rounded hover:bg-zinc-800 text-zinc-300 hover:text-white transition cursor-pointer"
+                    >
+                        <svg id="timer-icon-play" class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+                            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd" />
+                        </svg>
+                        <svg id="timer-icon-pause" class="w-3.5 h-3.5 hidden" fill="currentColor" viewBox="0 0 20 20">
+                            <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 012 0v4a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v4a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd" />
+                        </svg>
+                    </button>
+                    <button
+                        type="button"
+                        id="timer-reset-btn"
+                        title="Reset Timer"
+                        class="p-1 rounded hover:bg-zinc-800 text-zinc-400 hover:text-white transition cursor-pointer"
+                    >
+                        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                    </button>
+                    <select
+                        id="timer-mode-select"
+                        title="Timer Mode / Preset"
+                        class="bg-zinc-800 text-zinc-300 text-[11px] rounded px-1.5 py-0.5 border border-zinc-700 focus:outline-none font-sans cursor-pointer"
+                    >
+                        <option value="45">45m (Coding)</option>
+                        <option value="15">15m (Debrief)</option>
+                        <option value="60">60m (Full)</option>
+                        <option value="stopwatch">Stopwatch &uarr;</option>
+                    </select>
+                </div>
+            </div>
+            {% endif %}
+
             {% if session.google_meet_url %}
             <a
                 href="{{ session.google_meet_url }}"
@@ -177,10 +326,68 @@
         {% if is_interviewer %}
         <!-- Right Pane: Private Interviewer Context + Live Auto-Saving Rubric Form (Minimalist White) -->
         <aside class="w-full max-w-xl bg-zinc-50/70 flex flex-col h-full overflow-y-auto p-5 space-y-5">
+            <!-- Interviewer Timer & Pacing Card -->
+            <div class="rounded-xl bg-white border border-zinc-200 p-4 space-y-3 shadow-2xs">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <span id="sidebar-timer-dot" class="w-2 h-2 rounded-full bg-zinc-300"></span>
+                        <span class="text-xs font-bold uppercase tracking-wider text-zinc-500">Interview Timer</span>
+                    </div>
+                    <span id="sidebar-timer-stage-badge" class="px-2 py-0.5 rounded text-[10px] font-semibold bg-zinc-100 text-zinc-700">
+                        Ready to Start
+                    </span>
+                </div>
+
+                <div class="flex items-center justify-between gap-4">
+                    <div>
+                        <div id="sidebar-timer-display" class="font-mono text-3xl font-extrabold text-zinc-900 tracking-tight">
+                            45:00
+                        </div>
+                        <div id="sidebar-timer-subtext" class="text-[11px] text-zinc-400 mt-0.5">
+                            Target: 45m Coding &bull; 15m Debrief
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                        <button
+                            type="button"
+                            id="sidebar-timer-toggle"
+                            class="px-3.5 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-white font-semibold text-xs transition flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                        >
+                            <span id="sidebar-timer-btn-label">Start Timer</span>
+                        </button>
+                        <button
+                            type="button"
+                            id="sidebar-timer-reset"
+                            title="Reset Timer"
+                            class="px-2.5 py-2 rounded-xl bg-white hover:bg-zinc-100 border border-zinc-200 text-zinc-600 font-semibold text-xs transition cursor-pointer"
+                        >
+                            Reset
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Stage Progress Bar -->
+                <div class="space-y-1 pt-1">
+                    <div class="w-full bg-zinc-100 rounded-full h-1.5 overflow-hidden">
+                        <div id="sidebar-timer-progress-bar" class="bg-zinc-900 h-1.5 rounded-full transition-all duration-300" style="width: 0%;"></div>
+                    </div>
+                    <div class="flex items-center justify-between text-[10px] text-zinc-400 font-mono">
+                        <span>0m Clarify</span>
+                        <span>10m Approach</span>
+                        <span>35m Code</span>
+                        <span>45m Test</span>
+                        <span>60m Debrief</span>
+                    </div>
+                </div>
+            </div>
+
             <!-- Candidate Intake Context Card -->
             <div class="rounded-xl bg-white border border-zinc-200 p-4 space-y-2.5 shadow-2xs">
                 <div class="flex items-center justify-between">
                     <span class="text-xs font-semibold uppercase tracking-wider text-zinc-400">Candidate Intake Context</span>
+                    <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold {% if session.interview_mode == 'behavioral' %}bg-purple-50 text-purple-700 border border-purple-200{% elif session.interview_mode == 'ai_multifile' %}bg-blue-50 text-blue-700 border border-blue-200{% else %}bg-zinc-100 text-zinc-700 border border-zinc-200{% endif %}">
+                        {% if session.interview_mode == 'behavioral' %}Behavioural Interview{% elif session.interview_mode == 'ai_multifile' %}AI-Assisted Coding{% else %}Coding DSA Interview{% endif %}
+                    </span>
                 </div>
                 <div class="grid grid-cols-2 gap-2 text-xs">
                     <div class="p-2.5 rounded-lg bg-zinc-50 border border-zinc-200/80">
@@ -328,6 +535,8 @@
     const SESSION_ID = {{ session.id | tojson }};
     const IS_INTERVIEWER = {{ is_interviewer | tojson }};
     const INTERVIEWER_KEY = {{ (interviewer_key or '') | tojson }};
+    const CSRF_TOKEN = {{ request.state.csrf_token | tojson }};
+    const IS_LOCKED = {{ (session.status == 'COMPLETED' or (session.breakdown_sent_at is not none and session.breakdown_sent_at != '')) | tojson }};
 
     let workspaceFiles = {{ session.workspace_files | tojson }};
     let activeFilename = {{ session.active_filename | tojson }};
@@ -372,7 +581,6 @@
     }
 
     let suppressChangeBroadcast = false;
-    let debounceTimer = null;
 
     function applyEditorConfig() {
         const pill = document.getElementById('syntax-status-pill');
@@ -425,12 +633,14 @@
         editor.setValue(workspaceFiles[fname].content || '', -1);
         suppressChangeBroadcast = false;
         renderFileTabs();
+        updateRemoteCursorDisplay();
         if (notifyPeer && ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({
                 type: 'file_switch',
                 active_filename: activeFilename,
                 workspace_files: workspaceFiles
             }));
+            sendCursorPosition();
         }
     }
 
@@ -464,27 +674,35 @@
     suppressChangeBroadcast = true;
     editor.setValue((workspaceFiles[activeFilename] && workspaceFiles[activeFilename].content) || '', -1);
     suppressChangeBroadcast = false;
+    if (IS_LOCKED) {
+        editor.setReadOnly(true);
+    }
     applyEditorConfig();
     renderAiLogs();
 
     const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsKeyParam = (IS_INTERVIEWER && INTERVIEWER_KEY) ? `?key=${encodeURIComponent(INTERVIEWER_KEY)}` : '';
-    const wsUrl = `${wsProto}//${window.location.host}/ws/room/${SESSION_ID}${wsKeyParam}`;
+    const wsUrl = `${wsProto}//${window.location.host}/ws/room/${SESSION_ID}`;
+    const wsProtocols = (IS_INTERVIEWER && INTERVIEWER_KEY)
+        ? ['stronghire.v1', INTERVIEWER_KEY]
+        : ['stronghire.v1'];
     let ws = null;
 
     function connectWebSocket() {
-        ws = new WebSocket(wsUrl);
+        ws = new WebSocket(wsUrl, wsProtocols);
         const dot = document.getElementById('ws-status-dot');
         const txt = document.getElementById('ws-status-text');
 
         ws.onopen = () => {
             dot.className = 'w-2 h-2 rounded-full bg-emerald-500 inline-block';
             txt.textContent = 'Live Sync Connected';
+            sendCursorPosition();
         };
 
         ws.onclose = () => {
             dot.className = 'w-2 h-2 rounded-full bg-amber-500 inline-block';
             txt.textContent = 'Reconnecting...';
+            remoteCursor = null;
+            updateRemoteCursorDisplay();
             setTimeout(connectWebSocket, 1500);
         };
 
@@ -520,6 +738,18 @@
             } else if (msg.type === 'file_switch') {
                 workspaceFiles = msg.workspace_files || workspaceFiles;
                 switchActiveFile(msg.active_filename, false);
+            } else if (msg.type === 'remote_cursor') {
+                remoteCursor = {
+                    role: msg.role,
+                    name: msg.name,
+                    filename: msg.filename,
+                    cursor: msg.cursor,
+                    selection: msg.selection
+                };
+                updateRemoteCursorDisplay();
+            } else if (msg.type === 'remote_cursor_leave') {
+                remoteCursor = null;
+                updateRemoteCursorDisplay();
             } else if (msg.type === 'ai_chat_update') {
                 aiChatLogs = msg.ai_chat_logs || [];
                 renderAiLogs();
@@ -534,6 +764,170 @@
 
     connectWebSocket();
 
+    // Remote Collaborator Cursor Management
+    let remoteCursor = null;
+    let remoteSelectionMarkerId = null;
+
+    function clearRemoteSelection() {
+        if (remoteSelectionMarkerId !== null) {
+            editor.session.removeMarker(remoteSelectionMarkerId);
+            remoteSelectionMarkerId = null;
+        }
+    }
+
+    const remoteCursorEl = document.createElement('div');
+    remoteCursorEl.className = 'remote-cursor';
+    remoteCursorEl.style.display = 'none';
+
+    const remoteTooltipEl = document.createElement('div');
+    remoteTooltipEl.className = 'remote-cursor-tooltip';
+    remoteCursorEl.appendChild(remoteTooltipEl);
+
+    if (editor.renderer && editor.renderer.content) {
+        editor.renderer.content.appendChild(remoteCursorEl);
+    }
+
+    function updateRemoteCursorDisplay() {
+        clearRemoteSelection();
+
+        if (!remoteCursor || !remoteCursor.cursor || remoteCursor.filename !== activeFilename) {
+            remoteCursorEl.style.display = 'none';
+            return;
+        }
+
+        // Render remote text selection highlight if selection range exists
+        if (remoteCursor.selection) {
+            try {
+                const AceRange = (window.ace && ace.require) ? ace.require('ace/range').Range : null;
+                if (AceRange) {
+                    const sel = remoteCursor.selection;
+                    const range = new AceRange(sel.start.row, sel.start.column, sel.end.row, sel.end.column);
+                    const roleClass = `remote-selection-${remoteCursor.role}`;
+                    remoteSelectionMarkerId = editor.session.addMarker(
+                        range,
+                        `remote-selection ${roleClass}`,
+                        'text',
+                        false
+                    );
+                }
+            } catch (err) {
+                console.error("Error setting remote selection marker", err);
+            }
+        }
+
+        if (!editor.renderer || !editor.renderer.$cursorLayer) {
+            remoteCursorEl.style.display = 'none';
+            return;
+        }
+
+        const screenPos = editor.session.documentToScreenPosition(
+            remoteCursor.cursor.row,
+            remoteCursor.cursor.column
+        );
+        const cursorLayer = editor.renderer.$cursorLayer;
+        const config = cursorLayer.config;
+        if (!config) {
+            remoteCursorEl.style.display = 'none';
+            return;
+        }
+
+        const top = (screenPos.row - config.firstRowScreen) * config.lineHeight;
+        const padding = cursorLayer.$padding || 4;
+        const left = padding + (screenPos.column * config.characterWidth);
+        const height = config.lineHeight;
+
+        // Hide if outside visible editor viewport
+        if (top < 0 || top >= (config.maxHeight || 10000)) {
+            remoteCursorEl.style.display = 'none';
+            return;
+        }
+
+        remoteCursorEl.className = `remote-cursor remote-cursor-${remoteCursor.role}`;
+        remoteCursorEl.style.top = `${top}px`;
+        remoteCursorEl.style.left = `${left}px`;
+        remoteCursorEl.style.height = `${height}px`;
+        remoteCursorEl.style.display = 'block';
+
+        // Collision-free tooltip positioning:
+        // 1. Horizontal: If near the gutter / line numbers on the left, align to the right of the cursor
+        if (left < 75) {
+            remoteTooltipEl.style.left = '0px';
+            remoteTooltipEl.style.transform = 'none';
+        } else {
+            remoteTooltipEl.style.left = '50%';
+            remoteTooltipEl.style.transform = 'translateX(-50%)';
+        }
+
+        // 2. Vertical: If on the very first line at the top, flip below the cursor
+        if (top < 24) {
+            remoteTooltipEl.style.bottom = 'auto';
+            remoteTooltipEl.style.top = 'calc(100% + 4px)';
+        } else {
+            remoteTooltipEl.style.top = 'auto';
+            remoteTooltipEl.style.bottom = '100%';
+        }
+
+        remoteTooltipEl.textContent = remoteCursor.name || (remoteCursor.role === 'interviewer' ? 'Interviewer' : 'Candidate');
+    }
+
+    editor.renderer.on('afterRender', updateRemoteCursorDisplay);
+
+    let cursorBroadcastTimer = null;
+    function sendCursorPosition() {
+        if (cursorBroadcastTimer) return;
+        cursorBroadcastTimer = setTimeout(() => {
+            cursorBroadcastTimer = null;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const pos = editor.getCursorPosition();
+                const selRange = editor.selection.getRange();
+                const hasSelection = !selRange.isEmpty();
+                ws.send(JSON.stringify({
+                    type: 'cursor_move',
+                    filename: activeFilename,
+                    cursor: { row: pos.row, column: pos.column },
+                    selection: hasSelection ? {
+                        start: { row: selRange.start.row, column: selRange.start.column },
+                        end: { row: selRange.end.row, column: selRange.end.column }
+                    } : null
+                }));
+            }
+        }, 40);
+    }
+
+    editor.selection.on('changeCursor', sendCursorPosition);
+    editor.selection.on('changeSelection', sendCursorPosition);
+
+    let lastCodeSendTime = 0;
+    let codeSendTimer = null;
+    const CODE_SYNC_INTERVAL_MS = 40;
+
+    function broadcastCodeChange() {
+        const now = Date.now();
+        const elapsed = now - lastCodeSendTime;
+
+        const doSend = () => {
+            lastCodeSendTime = Date.now();
+            codeSendTimer = null;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'code_update',
+                    active_filename: activeFilename,
+                    workspace_files: workspaceFiles
+                }));
+            }
+        };
+
+        if (elapsed >= CODE_SYNC_INTERVAL_MS) {
+            if (codeSendTimer) {
+                clearTimeout(codeSendTimer);
+                codeSendTimer = null;
+            }
+            doSend();
+        } else if (!codeSendTimer) {
+            codeSendTimer = setTimeout(doSend, CODE_SYNC_INTERVAL_MS - elapsed);
+        }
+    }
+
     editor.session.on('change', () => {
         if (suppressChangeBroadcast) return;
         const currentContent = editor.getValue();
@@ -542,16 +936,7 @@
         } else {
             workspaceFiles[activeFilename].content = currentContent;
         }
-        clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                    type: 'code_update',
-                    active_filename: activeFilename,
-                    workspace_files: workspaceFiles
-                }));
-            }
-        }, 100);
+        broadcastCodeChange();
     });
 
     const btnAddFile = document.getElementById('btn-add-file');
@@ -589,8 +974,8 @@
         });
     }
 
-    if (IS_INTERVIEWER) {
-        const toggleEl = document.getElementById('toggle-syntax');
+    {% if is_interviewer %}
+    const toggleEl = document.getElementById('toggle-syntax');
         const langEl = document.getElementById('select-language');
         const modeEl = document.getElementById('select-interview-mode');
 
@@ -633,12 +1018,16 @@
             };
 
             try {
-                const rubricUrl = INTERVIEWER_KEY
-                    ? `/api/session/${SESSION_ID}/rubric?key=${encodeURIComponent(INTERVIEWER_KEY)}`
-                    : `/api/session/${SESSION_ID}/rubric`;
-                const res = await fetch(rubricUrl, {
+                const headers = {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': CSRF_TOKEN
+                };
+                if (INTERVIEWER_KEY) {
+                    headers['X-Interviewer-Key'] = INTERVIEWER_KEY;
+                }
+                const res = await fetch(`/api/session/${SESSION_ID}/rubric`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers,
                     body: JSON.stringify(payload)
                 });
                 if (res.ok) {
@@ -657,7 +1046,174 @@
             clearTimeout(rubricTimer);
             rubricTimer = setTimeout(saveRubricDraft, 800);
         });
-    }
+
+        // =============================================================
+        // Interviewer Timer Logic (Header + Sidebar Synced)
+        // =============================================================
+        let timerMode = '45'; // '45' | '15' | '60' | 'stopwatch'
+        let timerSeconds = 45 * 60;
+        let timerRunning = false;
+        let timerInterval = null;
+        let timerElapsedSeconds = 0;
+
+        const headerDisplay = document.getElementById('timer-display');
+        const sidebarDisplay = document.getElementById('sidebar-timer-display');
+        const modeSelect = document.getElementById('timer-mode-select');
+        const toggleBtn = document.getElementById('timer-toggle-btn');
+        const resetBtn = document.getElementById('timer-reset-btn');
+        const playIcon = document.getElementById('timer-icon-play');
+        const pauseIcon = document.getElementById('timer-icon-pause');
+
+        const sidebarToggle = document.getElementById('sidebar-timer-toggle');
+        const sidebarReset = document.getElementById('sidebar-timer-reset');
+        const sidebarBtnLabel = document.getElementById('sidebar-timer-btn-label');
+        const sidebarDot = document.getElementById('sidebar-timer-dot');
+        const sidebarStageBadge = document.getElementById('sidebar-timer-stage-badge');
+        const sidebarSubtext = document.getElementById('sidebar-timer-subtext');
+        const sidebarProgressBar = document.getElementById('sidebar-timer-progress-bar');
+
+        function formatTimerString(totalSecs) {
+            const isNegative = totalSecs < 0;
+            const abs = Math.abs(totalSecs);
+            const mins = Math.floor(abs / 60);
+            const secs = abs % 60;
+            const pad = (n) => String(n).padStart(2, '0');
+            return (isNegative ? '+' : '') + `${pad(mins)}:${pad(secs)}`;
+        }
+
+        function getPacingStage(elapsedSecs) {
+            const mins = elapsedSecs / 60;
+            if (mins < 10) {
+                return { badge: 'Phase 1: Clarify & Scope', class: 'bg-blue-50 text-blue-700 border border-blue-200' };
+            } else if (mins < 35) {
+                return { badge: 'Phase 2: Coding & Implementation', class: 'bg-emerald-50 text-emerald-700 border border-emerald-200' };
+            } else if (mins < 45) {
+                return { badge: 'Phase 3: Verification & Dry-Run', class: 'bg-amber-50 text-amber-700 border border-amber-200' };
+            } else if (mins < 60) {
+                return { badge: 'Phase 4: Debrief & Q&A', class: 'bg-purple-50 text-purple-700 border border-purple-200' };
+            } else {
+                return { badge: 'Time Up / Overtime', class: 'bg-red-50 text-red-700 border border-red-200' };
+            }
+        }
+
+        function updateTimerUI() {
+            const formatted = formatTimerString(timerSeconds);
+            if (headerDisplay) headerDisplay.textContent = formatted;
+            if (sidebarDisplay) sidebarDisplay.textContent = formatted;
+
+            if (timerMode !== 'stopwatch') {
+                if (timerSeconds < 0) {
+                    if (headerDisplay) headerDisplay.className = 'font-bold text-sm tracking-wider min-w-[46px] text-center text-red-400 animate-pulse';
+                    if (sidebarDisplay) sidebarDisplay.className = 'font-mono text-3xl font-extrabold text-red-600 tracking-tight animate-pulse';
+                } else if (timerSeconds <= 300) {
+                    if (headerDisplay) headerDisplay.className = 'font-bold text-sm tracking-wider min-w-[46px] text-center text-amber-300';
+                    if (sidebarDisplay) sidebarDisplay.className = 'font-mono text-3xl font-extrabold text-amber-600 tracking-tight';
+                } else {
+                    if (headerDisplay) headerDisplay.className = 'font-bold text-sm tracking-wider min-w-[46px] text-center text-white';
+                    if (sidebarDisplay) sidebarDisplay.className = 'font-mono text-3xl font-extrabold text-zinc-900 tracking-tight';
+                }
+            } else {
+                if (headerDisplay) headerDisplay.className = 'font-bold text-sm tracking-wider min-w-[46px] text-center text-emerald-300';
+                if (sidebarDisplay) sidebarDisplay.className = 'font-mono text-3xl font-extrabold text-zinc-900 tracking-tight';
+            }
+
+            if (playIcon) playIcon.classList.toggle('hidden', timerRunning);
+            if (pauseIcon) pauseIcon.classList.toggle('hidden', !timerRunning);
+            if (sidebarBtnLabel) sidebarBtnLabel.textContent = timerRunning ? 'Pause' : (timerElapsedSeconds > 0 ? 'Resume' : 'Start Timer');
+            if (sidebarDot) {
+                sidebarDot.className = timerRunning
+                    ? 'w-2 h-2 rounded-full bg-emerald-500 animate-pulse'
+                    : (timerElapsedSeconds > 0 ? 'w-2 h-2 rounded-full bg-amber-400' : 'w-2 h-2 rounded-full bg-zinc-300');
+            }
+
+            if (timerElapsedSeconds > 0) {
+                const stage = getPacingStage(timerElapsedSeconds);
+                if (sidebarStageBadge) {
+                    sidebarStageBadge.textContent = stage.badge;
+                    sidebarStageBadge.className = `px-2 py-0.5 rounded text-[10px] font-semibold ${stage.class}`;
+                }
+                const pct = Math.min(100, Math.round((timerElapsedSeconds / 3600) * 100));
+                if (sidebarProgressBar) sidebarProgressBar.style.width = `${pct}%`;
+                if (sidebarSubtext) {
+                    sidebarSubtext.textContent = `Elapsed: ${Math.floor(timerElapsedSeconds / 60)}m ${timerElapsedSeconds % 60}s of 60m standard slot`;
+                }
+            } else {
+                if (sidebarStageBadge) {
+                    sidebarStageBadge.textContent = 'Ready to Start';
+                    sidebarStageBadge.className = 'px-2 py-0.5 rounded text-[10px] font-semibold bg-zinc-100 text-zinc-700';
+                }
+                if (sidebarProgressBar) sidebarProgressBar.style.width = '0%';
+                if (sidebarSubtext) {
+                    sidebarSubtext.textContent = 'Target: 45m Coding • 15m Debrief';
+                }
+            }
+        }
+
+        function tickTimer() {
+            if (timerMode === 'stopwatch') {
+                timerSeconds += 1;
+                timerElapsedSeconds += 1;
+            } else {
+                timerSeconds -= 1;
+                timerElapsedSeconds += 1;
+            }
+            updateTimerUI();
+        }
+
+        function toggleTimer() {
+            if (timerRunning) {
+                clearInterval(timerInterval);
+                timerRunning = false;
+            } else {
+                timerRunning = true;
+                timerInterval = setInterval(tickTimer, 1000);
+            }
+            updateTimerUI();
+        }
+
+        function resetTimer() {
+            clearInterval(timerInterval);
+            timerRunning = false;
+            timerElapsedSeconds = 0;
+            if (timerMode === 'stopwatch') {
+                timerSeconds = 0;
+            } else {
+                timerSeconds = parseInt(timerMode, 10) * 60;
+            }
+            updateTimerUI();
+        }
+
+        function setTimerMode(newMode) {
+            timerMode = newMode;
+            if (modeSelect) modeSelect.value = newMode;
+            resetTimer();
+        }
+
+        if (toggleBtn) toggleBtn.addEventListener('click', toggleTimer);
+        if (sidebarToggle) sidebarToggle.addEventListener('click', toggleTimer);
+        if (resetBtn) resetBtn.addEventListener('click', resetTimer);
+        if (sidebarReset) sidebarReset.addEventListener('click', resetTimer);
+        if (modeSelect) {
+            modeSelect.addEventListener('change', (e) => setTimerMode(e.target.value));
+        }
+
+        updateTimerUI();
+    {% endif %}
 })();
 </script>
+{% if session.breakdown_sent_at %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const form = document.getElementById('live-rubric-form');
+    if (!form) return;
+    form.querySelectorAll('input, textarea, select, button').forEach((el) => {
+        el.disabled = true;
+    });
+    const indicator = document.getElementById('rubric-save-indicator');
+    if (indicator) indicator.textContent = 'Locked - judgement already sent';
+    const saveBtn = document.getElementById('btn-save-rubric');
+    if (saveBtn) saveBtn.classList.add('hidden');
+});
+</script>
+{% endif %}
 {% endblock %}

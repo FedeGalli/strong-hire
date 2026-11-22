@@ -1,24 +1,5 @@
-from enum import Enum
-from typing import Dict, List, Optional, Any
-from pydantic import BaseModel, Field
-
-
-class SessionStatus(str, Enum):
-    PENDING_PAYMENT = "PENDING_PAYMENT"
-    CONFIRMED = "CONFIRMED"
-    RESCHEDULE_REQUESTED = "RESCHEDULE_REQUESTED"
-    PAID_NEEDS_RESCHEDULE = "PAID_NEEDS_RESCHEDULE"
-    COMPLETED = "COMPLETED"
-    CANCELLED = "CANCELLED"
-    EXPIRED = "EXPIRED"
-
-
-class FinalVerdict(str, Enum):
-    STRONG_HIRE = "Strong Hire"
-    HIRE = "Hire"
-    LEAN_HIRE = "Lean Hire"
-    LEAN_NO_HIRE = "Lean No Hire"
-    NO_HIRE = "No Hire"
+from typing import Optional
+from pydantic import BaseModel, Field, field_validator
 
 
 SUPPORTED_LANGUAGES = [
@@ -48,19 +29,23 @@ VERDICT_OPTIONS = [
 ]
 
 
-class WorkspaceFile(BaseModel):
-    content: str = "# Write your solution here\n"
-    language: str = "python"
-
-
 class RubricUpdatePayload(BaseModel):
-    notes_clarification: str = ""
-    score_clarification: Optional[int] = None
-    notes_approach_complexity: str = ""
-    score_approach_complexity: Optional[int] = None
-    notes_code_quality: str = ""
-    score_code_quality: Optional[int] = None
-    notes_verification: str = ""
-    score_verification: Optional[int] = None
+    notes_clarification: str = Field(default="", max_length=5_000)
+    score_clarification: Optional[int] = Field(default=None, ge=1, le=5)
+    notes_approach_complexity: str = Field(default="", max_length=5_000)
+    score_approach_complexity: Optional[int] = Field(default=None, ge=1, le=5)
+    notes_code_quality: str = Field(default="", max_length=5_000)
+    score_code_quality: Optional[int] = Field(default=None, ge=1, le=5)
+    notes_verification: str = Field(default="", max_length=5_000)
+    score_verification: Optional[int] = Field(default=None, ge=1, le=5)
     final_verdict: Optional[str] = None
-    final_recap_and_next_steps: str = ""
+    final_recap_and_next_steps: str = Field(default="", max_length=10_000)
+
+    @field_validator("final_verdict")
+    @classmethod
+    def _validate_final_verdict(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or value == "":
+            return None
+        if value not in VERDICT_OPTIONS:
+            raise ValueError("Invalid final verdict.")
+        return value

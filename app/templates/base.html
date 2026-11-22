@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{% block title %}{{ settings.APP_TITLE }}{% endblock %}</title>
+    <link rel="icon" type="image/svg+xml" href="/static/stronghire-logo.svg">
     <script src="https://cdn.tailwindcss.com"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -48,9 +49,11 @@
     <header class="border-b border-zinc-200/80 bg-white/90 backdrop-blur sticky top-0 z-30">
         <div class="max-w-5xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
             <a href="/" class="flex items-center gap-3 group">
-                <div class="w-8 h-8 rounded-lg bg-zinc-900 flex items-center justify-center font-mono font-semibold text-xs text-white group-hover:bg-zinc-700 transition">
-                    &lt;/&gt;
-                </div>
+                <img
+                    src="/static/stronghire-logo.svg"
+                    alt="{{ settings.APP_TITLE }} logo"
+                    class="w-9 h-9 rounded-lg object-cover shadow-sm group-hover:opacity-90 transition"
+                />
                 <div class="flex items-center gap-2">
                     <span class="font-bold text-zinc-900 tracking-tight text-sm sm:text-base">{{ settings.APP_TITLE }}</span>
                 </div>
